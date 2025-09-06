@@ -58,6 +58,11 @@ analyze_assay_data <- function(full_dataset,
       sample_type == sample_type_to_filter
     )
   
+  dilution_factors <- c(
+    "SOD" = 50,
+    "CAT" = 10 
+  )
+  
   if (assay_to_filter %in% c("SOD", "CAT", "ALP", "AChE", "Bradford")) {
     plate_data <- base_data %>%
       filter(plate_replicate == replicate_to_filter)
@@ -68,7 +73,8 @@ analyze_assay_data <- function(full_dataset,
       results <- process_sod_cat(plate_data, 
                                  concentrations_vector, 
                                  assay_to_filter,
-                                 global_standards)
+                                 global_standards,
+                                 dilution_factor = dilution_factors[assay_to_filter])
     } else if (assay_to_filter == "Bradford") { 
       results <- process_bradford(plate_data, 
                                   concentrations_vector, 
@@ -116,7 +122,8 @@ analyze_assay_data <- function(full_dataset,
 process_sod_cat <- function(plate_data, 
                             concentrations_vector,
                             assay_to_filter,
-                            global_standards) 
+                            global_standards,
+                            dilution_factor = 1) 
 {
   n_standards <- length(concentrations_vector)
   blank_well_letter <- LETTERS[n_standards]
@@ -154,7 +161,8 @@ process_sod_cat <- function(plate_data,
     mutate(calculated_concentration = suppressWarnings(
       ED(pl_model, percent_inhibition, type = "absolute")[, 1]
     )) %>%
-    mutate(calculated_concentration = if_else(is.nan(calculated_concentration), 0, calculated_concentration))
+    mutate(calculated_concentration = if_else(is.nan(calculated_concentration), 0, calculated_concentration)) %>%
+    mutate(calculated_concentration = calculated_concentration * dilution_factor)
   
   final_results <- apply_qc_flags(final_results, assay_type = assay_to_filter)
   
@@ -250,6 +258,8 @@ process_bradford <- function(plate_data,
   current_fiber <- unique(plate_data$fiber_type)
   current_sample <- unique(plate_data$sample_type)
   
+  dilution_factor_bf = 20
+  
   global_blank_abs <- global_standards %>%
     filter(
       assay_type == assay_to_filter,
@@ -278,7 +288,8 @@ process_bradford <- function(plate_data,
     mutate(calculated_concentration = suppressWarnings(
       ED(pl_model, absorbance, type = "absolute")[, 1]
     )) %>%
-    mutate(calculated_concentration = if_else(is.nan(calculated_concentration), 0, calculated_concentration))
+    mutate(calculated_concentration = if_else(is.nan(calculated_concentration), 0, calculated_concentration)) %>%
+    mutate(calculated_concentration = calculated_concentration * dilution_factor_bf)
   
   final_results <- apply_qc_flags(final_results, assay_type = assay_to_filter)
   
@@ -575,8 +586,8 @@ process_ache <- function(plate_data,
       id_cols = c(well_name, fiber_type, assay_type, sample_week, sample_type, plate_replicate),
       names_from = reading,
       values_from = absorbance) %>%
-    mutate(Calculated_Activity = ((SecondRead - FirstRead) * dilution_factor * 200) / 
-             (summary_values$mean_calibrator[2] - summary_values$mean_blank[2])) %>%
+    mutate(Calculated_Activity = (((SecondRead - FirstRead) * dilution_factor * 200) / 
+             (summary_values$mean_calibrator[2] - summary_values$mean_blank[2]))/1000) %>%
     rename(calculated_concentration = Calculated_Activity)
   
   final_results <- apply_qc_flags(final_ache_data, assay_type = "AChE")
