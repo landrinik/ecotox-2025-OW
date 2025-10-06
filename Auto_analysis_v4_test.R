@@ -134,6 +134,7 @@ final_long_table_normalized <- final_long_table_avgstd %>%
 
 # Save to Excel file for downstream use
 write_xlsx(final_long_table_normalized, "final_long_table_normalized.xlsx")
+write_xlsx(final_long_table_avgstd, "final_long_table_avgstd.xlsx")
 # View(bradford_lookup)
 # View(final_long_table_avgstd)
 # View the final long table to confirm it's correct

@@ -8,6 +8,11 @@ library(glue)
 library(yaml)
 library(stringr)
 library(shinyjs)
+library(emmeans)
+library(broom)        
+library(broom.mixed)
+library(car)
+library(lme4)
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
@@ -20,6 +25,19 @@ tissue_weights <- read_excel(here("tissue_weights_clean.xlsx")) %>% clean_names(
 # -- Assay Data --
 
 final_data_raw <- read_excel(here("Assay_endpoint_DATA_cleaned.xlsx")) %>% clean_names()
+
+
+create_experiment_batch <- function(df) {
+  df %>%
+    mutate(
+      experiment_batch = case_when(
+        tolower(fiber_type) == "cotton" ~ "April_Cotton",
+        tolower(fiber_type) == "pet" ~ "January_PET",
+        TRUE ~ NA_character_
+      ),
+      experiment_batch = as.factor(experiment_batch)
+    )
+}
 
 # Annotate assay-specific columns with robust parsing
 annotate_common <- function(df) {
@@ -67,7 +85,7 @@ annotate_common <- function(df) {
       fiber_group = if_else(treatment == "Control" & fiber_concentration == "0", "Control", paste(fiber_type, treatment))
     ) %>%
     # suppress unused columns if desired
-    select(-week_start, -week_end, -well_number)
+    dplyr::select(-week_start, -week_end, -well_number)
 }
 
 final_data <- annotate_common(final_data_raw) %>%
@@ -176,9 +194,10 @@ summarize_inter <- function(df, threshold) {
       cv_flag = cv > threshold,
       mean_activity_display = if_else(
         has_inf | has_zero | has_na,
-        paste0(round(mean_activity, 2), "*"),
-        as.character(round(mean_activity, 2))
-      )
+        paste0(format(mean_activity, digits = 4, scientific = FALSE), "*"),
+        format(mean_activity, digits = 4, scientific = FALSE)
+      ),
+      sd_activity = signif(sd_activity, 5)
     ) %>%
     dplyr::select(-has_inf, -has_zero, -has_na, -vals)
 }
@@ -251,15 +270,171 @@ ui <- fluidPage(
     
     column(
       9,
-      h4("Results"),
-      DTOutput("table"),
-      br(),
-      plotOutput("dist_plot"),
-      br(),
-      plotOutput("dot_plot"),
-      br(),
-      verbatimTextOutput("info")
+      
+      tabsetPanel(
+        id = "analysis_tabs",
+        
+        tabPanel(
+          "Visualization",
+          h4("Results"),
+          DTOutput("table"),
+          br(),
+          tags$div(
+            style = "width: 100%; max-width: 1200px; aspect-ratio: 4/3;",
+            plotOutput("dist_plot", width = "100%", height = "100%")
+          ),
+          br(),
+          tags$div(
+            style = "width: 100%; max-width: 1200px; aspect-ratio: 4/3;",
+            plotOutput("dot_plot", width = "100%", height = "100%")
+          ),
+          br(),
+          verbatimTextOutput("info")
+        ),
+        
+        tabPanel(
+          "Regression Analysis",
+          h4("Multiple Linear Regression"),
+          fluidRow(
+            column(6,
+                   h5("Model Settings"),
+                   selectInput("regression_endpoint", "Select Endpoint:",
+                               choices = NULL),
+                   selectInput("regression_dataset", "Dataset:",
+                               choices = c("Assay Data" = "assay", 
+                                           "Physical Data" = "physical"),
+                               selected = "physical"),
+                   checkboxInput("include_interaction", 
+                                 "Include Treatment × Week Interaction", 
+                                 value = TRUE),
+                   checkboxInput("include_concentration", 
+                                 "Include Fiber Concentration", 
+                                 value = TRUE),
+                   actionButton("run_regression", "Run Regression Model", 
+                                class = "btn-primary")
+            ),
+            column(6,
+                   h5("Post-hoc Comparisons"),
+                   selectInput("emmeans_by", "Calculate EM Means by:",
+                               choices = c("Treatment Category" = "treatment_category",
+                                           "Week" = "week",
+                                           "Treatment × Week" = "both")),
+                   selectInput("comparison_type", "Comparison Type:",
+                               choices = c("All Pairwise" = "pairwise",
+                                           "vs. Control Only" = "control")),
+                   selectInput("adjustment_method", "P-value Adjustment:",
+                               choices = c("Tukey HSD" = "tukey",
+                                           "Dunnett (vs Control)" = "dunnett",
+                                           "Bonferroni" = "bonferroni",
+                                           "Holm" = "holm",
+                                           "FDR/Benjamini-Hochberg" = "fdr",
+                                           "Scheffe" = "scheffe",
+                                           "None (use with caution)" = "none"),
+                               selected = "tukey"),
+                   actionButton("run_emmeans", "Calculate EM Means")
+            )
+            
+          ),
+          hr(),
+          h5("Model Summary"),
+          verbatimTextOutput("model_summary"),
+          h5("ANOVA Table"),
+          DTOutput("anova_table"),
+          h5("Diagnostic Plots"),
+          plotOutput("diagnostic_plots", height = "600px"),
+          h5("Estimated Marginal Means"),
+          plotOutput("emmeans_plot"),
+          DTOutput("emmeans_table"),
+          h5("Pairwise Comparisons"),
+          DTOutput("pairwise_table")
+        ),
+        
+        # NEW TAB - Mixed Effects Analysis
+        tabPanel(
+          "Mixed Effects Analysis",
+          h4("Linear Mixed Effects Regression (Hierarchical Modeling)"),
+          
+          fluidRow(
+            column(6,
+                   h5("Model Settings"),
+                   selectInput("lmer_endpoint", "Select Endpoint:",
+                               choices = NULL),
+                   selectInput("lmer_dataset", "Dataset:",
+                               choices = c("Assay Data" = "assay", 
+                                           "Physical Data" = "physical"),
+                               selected = "physical"),
+                   checkboxInput("lmer_include_interaction",
+                                 "Include Treatment × Week Interaction",
+                                 value = TRUE),
+                   checkboxInput("lmer_include_concentration",
+                                 "Include Fiber Concentration",
+                                 value = FALSE),  # Default off to avoid nesting issues
+                   selectInput("random_structure", "Random Effects Structure:",
+                               choices = c(
+                                 "Tank/Sample (Random Intercept): (1|tank)" = "intercept",
+                                 "Tank/Sample + Experiment Batch: (1|tank) + (1|experiment_batch)" = "batch",
+                                 "Nested Tissue (mf_counts only): (1|individual/tissue)" = "nested",
+                                 "Full Model: Batch + Tank + Tissue" = "full"
+                               ),
+                               selected = "intercept"),
+                   helpText("Tank for assay data. Sample for physical data. Batch accounts for Cotton (April) vs PET (January) experiments.",
+                            style = "color: #666;"),
+                   helpText("⚠️ NOTE: Week effects and interactions require selecting 2+ weeks in the sidebar.",
+                            style = "color: #d9534f;"),
+                   helpText("⚠️ NOTE: Batch effects require BOTH Cotton AND PET data. If only one fiber type is selected, batch effect will be excluded.",
+                            style = "color: #d9534f;"),
+                   
+                   actionButton("run_lmer", "Run Mixed Model",
+                                class = "btn-primary")
+            ),
+            column(6,
+                   h5("Post-hoc Comparisons"),
+                   selectInput("lmer_emmeans_by", "Calculate EM Means by:",
+                               choices = c("Treatment Category" = "treatment_category",
+                                           "Week" = "week",
+                                           "Treatment × Week" = "both")),
+                   selectInput("lmer_comparison_type", "Comparison Type:",
+                               choices = c("All Pairwise" = "pairwise",
+                                           "vs. Control Only" = "control")),
+                   selectInput("lmer_adjustment_method", "P-value Adjustment:",  # ADD THIS
+                               choices = c("Tukey HSD" = "tukey",
+                                           "Dunnett (vs Control)" = "dunnett",
+                                           "Holm" = "holm",
+                                           "Bonferroni" = "bonferroni",
+                                           "FDR/Benjamini-Hochberg" = "fdr",
+                                           "None (use with caution)" = "none"),
+                               selected = "tukey"),
+                   actionButton("run_lmer_emmeans", "Calculate EM Means"),
+                   br(), br(),
+                   downloadButton("download_lmer", "Download Results")
+            )
+          ),
+          
+          hr(),
+          
+          h5("Model Summary"),
+          verbatimTextOutput("lmer_summary"),
+          
+          h5("Fixed Effects ANOVA"),
+          DTOutput("lmer_anova_table"),
+          
+          h5("Random Effects Variance"),
+          verbatimTextOutput("lmer_random_effects"),
+          
+          h5("Model Diagnostics"),
+          plotOutput("lmer_diagnostics", height = "600px"),
+          
+          h5("Estimated Marginal Means"),
+          plotOutput("lmer_emmeans_plot"),
+          DTOutput("lmer_emmeans_table"),
+          
+          h5("Pairwise Comparisons"),
+          DTOutput("lmer_pairwise_table")
+        )
+      ) 
+      
     )
+    
   )
 )
 
@@ -363,7 +538,7 @@ server <- function(input, output, session) {
         ),
         # Always round for counts (controls and non-controls)
         value_corr = if_else(endpoint == "mf_counts", round(value_corr), value_corr),
-        value = if_else(endpoint == "mf_counts", round(value), value) # round visible mf_counts for table
+        value = if_else(endpoint == "mf_counts", round(value), value)
       ) %>%
       ungroup()
     
@@ -371,16 +546,25 @@ server <- function(input, output, session) {
       # Return original values for all, but display rounded counts in table
       df
     } else {
-      # Use the *corrected* values only for downstream summary (not for controls in table)
       df %>%
         mutate(use_val = if_else(endpoint == "mf_counts", value_corr, value)) %>%
         group_by(fiber_group, week, endpoint, tissue_type, fiber_concentration) %>%
         summarise(
-          mean_value = round(mean(use_val, na.rm = TRUE)),
+          mean_value = mean(use_val, na.rm = TRUE),
           sd_value = sd(use_val, na.rm = TRUE),
           n = n(),
           cv = ifelse(mean_value != 0, 100 * sd_value / mean_value, NA_real_),
           .groups = "drop"
+        ) %>%
+        mutate(
+          # Round appropriately based on magnitude
+          mean_value = if_else(
+            abs(mean_value) < 1,
+            round(mean_value, 4),
+            round(mean_value, 2)  
+          ),
+          sd_value = signif(sd_value, 5),
+          cv = round(cv, 2)
         )
     }
   })
@@ -402,6 +586,16 @@ server <- function(input, output, session) {
         value = if_else(endpoint == "mf_counts", round(value), value)
       )
     }
+    
+    # Hide avg_control and value_corr for non-mf_counts endpoints (only in baseline mode)
+    if("endpoint" %in% names(df) && 
+       !all(df$endpoint == "mf_counts") && 
+       "avg_control" %in% names(df) && 
+       "value_corr" %in% names(df)) {
+      df <- df %>% select(-avg_control, -value_corr)
+    }
+    
+    
     datatable(df, filter = "top", options = list(pageLength = 15))
   })
   
@@ -413,6 +607,10 @@ server <- function(input, output, session) {
     
     if (input$active_dataset == "assay") {
       x_axis_var <- input$x_axis_assay %||% "fiber_group"
+      # Convert week to factor if it's the x-axis
+      if (x_axis_var == "week" && "week" %in% names(df)) {
+        df$week <- factor(df$week)
+      }
       ggplot(df, aes_string(x = x_axis_var, y = "mean_activity", fill = "fiber_concentration")) +
         geom_boxplot(outlier.shape = NA, alpha = 0.7) +
         geom_jitter(width = 0.15, alpha = 0.5, size = 2) +
@@ -501,6 +699,721 @@ server <- function(input, output, session) {
       writexl::write_xlsx(if (is.null(df)) data.frame(Message = "No data for selected filters / mode") else df, file)
     }
   )
-}
+  
+  # ============================================================================
+  # REGRESSION ANALYSIS MODULE - ADD THIS ENTIRE SECTION
+  # ============================================================================
+  
+  # Dynamic endpoint selection for regression
+  observe({
+    if (input$regression_dataset == "assay") {
+      choices <- unique(assay_filtered()$assay_type)
+    } else {
+      choices <- unique(phys_filtered()$endpoint)
+    }
+    updateSelectInput(session, "regression_endpoint", choices = choices)
+  })
+  
+  # Create five-category treatment variable for regression
+  regression_data <- reactive({
+    if (input$regression_dataset == "assay") {
+      df <- assay_filtered()
+      
+      df <- df %>%
+        mutate(
+          # Convert to lowercase for matching
+          fiber_type_lower = tolower(fiber_type),
+          treatment_lower = tolower(treatment),
+          
+          treatment_category = case_when(
+            treatment_lower == "control" ~ "Control",
+            fiber_type_lower == "cotton" & treatment_lower == "untreated" ~ "Untreated Cotton",
+            fiber_type_lower == "cotton" & treatment_lower == "treated" ~ "Treated Cotton",
+            fiber_type_lower == "pet" & treatment_lower == "untreated" ~ "Untreated Polyester",
+            fiber_type_lower == "pet" & treatment_lower == "treated" ~ "Treated Polyester",
+            TRUE ~ NA_character_
+          ),
+          treatment_category = factor(
+            treatment_category,
+            levels = c("Control", "Untreated Cotton", "Treated Cotton",
+                       "Untreated Polyester", "Treated Polyester")
+          ),
+          week = as.factor(week),
+          fiber_concentration = as.factor(fiber_concentration),
+          sample_type = as.factor(sample_type)
+        ) %>%
+        filter(assay_type == input$regression_endpoint) %>%
+        droplevels()
+      
+      df$outcome <- df$calculated_concentration
+      
+    } else {
+      df <- phys_filtered()
+      
+      df <- df %>%
+        mutate(
+          # Convert to lowercase for matching
+          fiber_type_lower = tolower(fiber_type),
+          treatment_lower = tolower(treatment),
+          
+          treatment_category = case_when(
+            treatment_lower == "control" ~ "Control",
+            fiber_type_lower == "cotton" & treatment_lower == "untreated" ~ "Untreated Cotton",
+            fiber_type_lower == "cotton" & treatment_lower == "treated" ~ "Treated Cotton",
+            fiber_type_lower == "pet" & treatment_lower == "untreated" ~ "Untreated Polyester",
+            fiber_type_lower == "pet" & treatment_lower == "treated" ~ "Treated Polyester",
+            TRUE ~ NA_character_
+          ),
+          treatment_category = factor(
+            treatment_category,
+            levels = c("Control", "Untreated Cotton", "Treated Cotton",
+                       "Untreated Polyester", "Treated Polyester")
+          ),
+          week = as.factor(week),
+          fiber_concentration = as.factor(fiber_concentration),
+          tissue_type = as.factor(tissue_type)
+        ) %>%
+        filter(endpoint == input$regression_endpoint) %>%
+        droplevels()
+      
+      df$outcome <- df$value
+    }
+    
+    df
+  })
+  
+  # Fit regression model
+  regression_model <- eventReactive(input$run_regression, {
+    df <- regression_data()
+    req(nrow(df) > 0)
+    
+    # DEBUG: Print what we have
+    cat("\n=== DEBUG INFO ===\n")
+    cat("Number of rows:", nrow(df), "\n")
+    cat("Treatment categories:", paste(unique(df$treatment_category), collapse=", "), "\n")
+    cat("Weeks:", paste(unique(df$week), collapse=", "), "\n")
+    cat("Fiber concentrations:", paste(unique(df$fiber_concentration), collapse=", "), "\n")
+    
+    # Count levels for each factor
+    n_treatment <- length(unique(na.omit(df$treatment_category)))
+    n_week <- length(unique(na.omit(df$week)))
+    n_conc <- length(unique(na.omit(df$fiber_concentration)))
+    
+    # Validate minimum requirements
+    if (n_treatment < 2) {
+      stop("Cannot fit model: treatment_category has ", n_treatment, 
+           " level(s), need at least 2. Please adjust your filters to include more groups.")
+    }
+    
+    # Build formula based on user selections AND available data
+    formula_parts <- "outcome ~ treatment_category"
+    
+    # Only include week if there are 2+ weeks
+    if (n_week >= 2) {
+      if (input$include_interaction) {
+        formula_parts <- paste0(formula_parts, " * week")
+      } else {
+        formula_parts <- paste0(formula_parts, " + week")
+      }
+    } else {
+      message("Only one week detected (", unique(df$week), "). Week effects and interactions excluded from model.")
+    }
+    
+    # ONLY include concentration if it has 2+ levels
+    if (input$include_concentration && n_conc >= 2) {
+      formula_parts <- paste0(formula_parts, " + fiber_concentration")
+      cat("Including fiber_concentration in model (", n_conc, " levels)\n")
+    } else if (input$include_concentration && n_conc < 2) {
+      cat("WARNING: Skipping fiber_concentration - only", n_conc, "level(s)\n")
+    }
+    
+    # Include tissue/sample type if multiple are present
+    if (input$regression_dataset == "assay" && length(unique(df$sample_type)) > 1) {
+      formula_parts <- paste0(formula_parts, " + sample_type")
+    } else if (input$regression_dataset == "physical" && length(unique(df$tissue_type)) > 1) {
+      formula_parts <- paste0(formula_parts, " + tissue_type")
+    }
+    
+    cat("Final formula:", formula_parts, "\n")
+    cat("==================\n\n")
+    
+    formula_obj <- as.formula(formula_parts)
+    
+    # Fit model
+    model <- lm(formula_obj, data = df)
+    return(model)
+  })
+  
+  
+  
+  
+  # Model summary output
+  output$model_summary <- renderPrint({
+    model <- regression_model()
+    summary(model)
+  })
+  
+  # ANOVA table
+  output$anova_table <- renderDT({
+    model <- regression_model()
+    anova_results <- Anova(model, type = "II")
+    
+    anova_df <- as.data.frame(anova_results) %>%
+      tibble::rownames_to_column("Term") %>%
+      mutate(across(where(is.numeric), ~round(.x, 4)))
+    
+    datatable(anova_df, options = list(pageLength = 10))
+  })
+  
+  # Diagnostic plots
+  output$diagnostic_plots <- renderPlot({
+    model <- regression_model()
+    par(mfrow = c(2, 2))
+    plot(model)
+  })
+  
+  # Calculate estimated marginal means
+  emmeans_results <- eventReactive(list(input$run_emmeans, regression_model()), {
+    model <- regression_model()
+    df <- regression_data()
+    
+    has_tissue <- if (input$regression_dataset == "assay") {
+      "sample_type" %in% names(df) && length(unique(df$sample_type)) > 1
+    } else {
+      "tissue_type" %in% names(df) && length(unique(df$tissue_type)) > 1
+    }
+    has_week <- "week" %in% names(df) && length(unique(na.omit(df$week))) > 1
+    tissue_var <- if (input$regression_dataset == "assay") "sample_type" else "tissue_type"
+    
+    # Choose formula safely based on availability
+    if (input$emmeans_by == "treatment_category") {
+      emm <- emmeans(model, ~ treatment_category)
+    } else if (input$emmeans_by == "week" && has_week) {
+      emm <- emmeans(model, ~ week)
+    } else if (input$emmeans_by == "both" && has_week) {
+      emm <- emmeans(model, ~ treatment_category | week)
+    } else if (input$emmeans_by == "tissue" && has_tissue) {
+      emm <- emmeans(model, as.formula(paste0("~ treatment_category | ", tissue_var)))
+    } else if (input$emmeans_by == "all" && has_tissue && has_week) {
+      emm <- emmeans(model, as.formula(paste0("~ treatment_category | week + ", tissue_var)))
+    } else {
+      # Fallback for single-week or no-tissue cases
+      emm <- emmeans(model, ~ treatment_category)
+    }
+    emm
+  })
+  
+  
+  # EM Means plot (REGRESSION)
+  output$emmeans_plot <- renderPlot({
+    emm <- emmeans_results()
+    
+    # Get confidence intervals with standard column names
+    df_emm <- summary(emm, infer = TRUE)  # This gives emmean, SE, df, lower.CL, upper.CL
+    df_emm <- as.data.frame(df_emm)
+    
+    # Debug: check what columns we actually have
+    cat("EM means columns:", paste(names(df_emm), collapse=", "), "\n")
+    
+    # Detect available grouping columns
+    has_week <- "week" %in% names(df_emm) && length(unique(na.omit(df_emm$week))) > 1
+    has_treat <- "treatment_category" %in% names(df_emm)
+    
+    # Handle different possible column names for confidence intervals
+    if ("lower.CL" %in% names(df_emm)) {
+      lower_col <- "lower.CL"
+      upper_col <- "upper.CL"
+    } else if ("asymp.LCL" %in% names(df_emm)) {
+      lower_col <- "asymp.LCL"
+      upper_col <- "asymp.UCL"
+    } else {
+      # Fallback: compute CIs manually from SE
+      df_emm$lower.CL <- df_emm$emmean - 1.96 * df_emm$SE
+      df_emm$upper.CL <- df_emm$emmean + 1.96 * df_emm$SE
+      lower_col <- "lower.CL"
+      upper_col <- "upper.CL"
+    }
+    
+    # Build a safe EM means plot
+    p <- ggplot(df_emm, aes(
+      x = if (has_treat) treatment_category else factor(1),
+      y = emmean
+    )) +
+      geom_point(size = 3, color = "#2c7fb8") +
+      geom_errorbar(aes(ymin = .data[[lower_col]], ymax = .data[[upper_col]]), 
+                    width = 0.2, color = "#2c7fb8") +
+      coord_flip() +
+      theme_minimal() +
+      labs(
+        title = "Estimated Marginal Means with 95% Confidence Intervals",
+        x = "Group",
+        y = "Estimated Mean"
+      ) +
+      theme(axis.text.y = element_text(size = 10))
+    
+    # If multiple weeks are present, facet
+    if (has_week) {
+      p <- p + facet_wrap(~ week, scales = "free_y")
+    }
+    
+    print(p)
+  })
+  
+  output$emmeans_table <- renderDT({
+    emm <- emmeans_results()
+    emm_df <- as.data.frame(summary(emm, infer = TRUE)) %>%
+      mutate(across(where(is.numeric), ~signif(.x, 5)))
+    datatable(emm_df, options = list(pageLength = 10))
+  })
+  
+  
+  # Pairwise comparisons for REGULAR REGRESSION
+  output$pairwise_table <- renderDT({
+    emm <- emmeans_results()
+    adj_method <- input$adjustment_method
+    
+    # Compute comparisons
+    if (input$comparison_type == "pairwise") {
+      pairs_result <- pairs(emm, adjust = adj_method)
+    } else if (input$comparison_type == "control") {
+      if (adj_method == "dunnett") {
+        pairs_result <- contrast(emm, method = "trt.vs.ctrl", ref = "Control", 
+                                 adjust = "dunnett")
+      } else {
+        pairs_result <- contrast(emm, method = "trt.vs.ctrl", ref = "Control", 
+                                 adjust = adj_method)
+      }
+    } else {
+      pairs_result <- pairs(emm, adjust = adj_method)
+    }
+    
+    # Convert and add Significant column
+    pairs_df <- as.data.frame(pairs_result) %>%
+      mutate(
+        across(where(is.numeric), ~signif(.x, 5)),
+        Significant = if_else(p.value < 0.05, "Yes", "No"),  # ADD THIS
+        Adjustment = adj_method
+      )
+    
+    datatable(pairs_df,
+              options = list(pageLength = 20, scrollX = TRUE),
+              filter = "top") %>%
+      formatStyle("Significant",
+                  backgroundColor = styleEqual(c("Yes", "No"),
+                                               c("lightgreen", "white")))
+  })
+  
+  
+  # Download regression results
+  output$download_regression <- downloadHandler(
+    filename = function() {
+      paste0("regression_analysis_", input$regression_endpoint, "_", 
+             Sys.Date(), ".xlsx")
+    },
+    content = function(file) {
+      model <- regression_model()
+      emm <- emmeans_results()
+      
+      # Create workbook with multiple sheets
+      wb_list <- list(
+        "Model_Summary" = broom::tidy(model),
+        "ANOVA" = broom::tidy(Anova(model, type = "II")),
+        "EM_Means" = as.data.frame(emm),
+        "Pairwise_Comparisons" = as.data.frame(pairs(emm, adjust = "tukey"))
+      )
+      
+      writexl::write_xlsx(wb_list, file)
+    }
+  )
+  
+  # END OF REGRESSION ANALYSIS MODULE
+  # ============================================================================
 
+  # ============================================================================
+  # MIXED EFFECTS ANALYSIS MODULE
+  # ============================================================================
+  
+  # Dynamic endpoint selection for lmer
+  observe({
+    if (input$lmer_dataset == "assay") {
+      choices <- unique(assay_filtered()$assay_type)
+    } else {
+      choices <- unique(phys_filtered()$endpoint)
+    }
+    updateSelectInput(session, "lmer_endpoint", choices = choices)
+  })
+  
+  # Prepare data for mixed model
+  lmer_data <- reactive({
+    if (input$lmer_dataset == "assay") {
+      df <- assay_filtered()
+      
+      # Add experiment batch variable
+      df <- create_experiment_batch(df)
+      
+      df <- df %>%
+        mutate(
+          fiber_type_lower = tolower(fiber_type),
+          treatment_lower = tolower(treatment),
+          
+          treatment_category = case_when(
+            treatment_lower == "control" ~ "Control",
+            fiber_type_lower == "cotton" & treatment_lower == "untreated" ~ "Untreated Cotton",
+            fiber_type_lower == "cotton" & treatment_lower == "treated" ~ "Treated Cotton",
+            fiber_type_lower == "pet" & treatment_lower == "untreated" ~ "Untreated Polyester",
+            fiber_type_lower == "pet" & treatment_lower == "treated" ~ "Treated Polyester",
+            TRUE ~ NA_character_
+          ),
+          treatment_category = factor(
+            treatment_category,
+            levels = c("Control", "Untreated Cotton", "Treated Cotton",
+                       "Untreated Polyester", "Treated Polyester")
+          ),
+          week = as.factor(week),
+          fiber_concentration = as.factor(fiber_concentration),
+          sample_type = as.factor(sample_type),
+          tank = as.factor(tank)
+        ) %>%
+        filter(assay_type == input$lmer_endpoint) %>%
+        droplevels()
+      
+      df$outcome <- df$calculated_concentration
+      df$grouping_var <- df$tank  # Tank is the sample unit
+      
+    } else {
+      # Physical data
+      df <- phys_filtered() %>%
+        filter(endpoint == input$lmer_endpoint)
+      
+      # Add experiment batch variable
+      df <- create_experiment_batch(df)
+      
+      # For mf_counts, extract individual ID from sample (e.g., "1_1" -> "1")
+      if (input$lmer_endpoint == "mf_counts") {
+        df <- df %>%
+          mutate(
+            individual_id = str_extract(sample, "^[0-9]+"),
+            tissue_replicate = sample  # Full identifier for nested effect
+          )
+      } else {
+        # For other endpoints, sample = individual = tank
+        df <- df %>%
+          mutate(
+            individual_id = as.character(sample),
+            tank_id = as.character(sample)  # Sample IS the tank for physical data
+          )
+      }
+      
+      df <- df %>%
+        mutate(
+          fiber_type_lower = tolower(fiber_type),
+          treatment_lower = tolower(treatment),
+          
+          treatment_category = case_when(
+            treatment_lower == "control" ~ "Control",
+            fiber_type_lower == "cotton" & treatment_lower == "untreated" ~ "Untreated Cotton",
+            fiber_type_lower == "cotton" & treatment_lower == "treated" ~ "Treated Cotton",
+            fiber_type_lower == "pet" & treatment_lower == "untreated" ~ "Untreated Polyester",
+            fiber_type_lower == "pet" & treatment_lower == "treated" ~ "Treated Polyester",
+            TRUE ~ NA_character_
+          ),
+          treatment_category = factor(
+            treatment_category,
+            levels = c("Control", "Untreated Cotton", "Treated Cotton",
+                       "Untreated Polyester", "Treated Polyester")
+          ),
+          week = as.factor(week),
+          fiber_concentration = as.factor(fiber_concentration),
+          tissue_type = as.factor(tissue_type),
+          individual_id = as.factor(individual_id)
+        ) %>%
+        droplevels()
+      
+      df$outcome <- df$value
+      df$grouping_var <- df$individual_id  # Sample/individual/tank are the same
+    }
+    
+    df
+  })
+  
+  
+  # Fit mixed effects model
+  lmer_model <- eventReactive(input$run_lmer, {
+    df <- lmer_data()
+    req(nrow(df) > 0)
+    
+    # Validation
+    n_treatment <- length(unique(na.omit(df$treatment_category)))
+    n_week <- length(unique(na.omit(df$week)))
+    n_groups <- length(unique(na.omit(df$grouping_var)))
+    n_batch <- length(unique(na.omit(df$experiment_batch)))
+    
+    if (n_treatment < 2) stop("Need at least 2 treatment categories")
+    if (n_groups < 3) stop("Need at least 3 grouping levels for random effects")
+    
+    # Build fixed effects formula
+    fixed_formula <- "outcome ~ treatment_category"
+    
+    # Only include week if there are 2+ weeks
+    if (n_week >= 2) {
+      if (input$lmer_include_interaction) {
+        fixed_formula <- paste0(fixed_formula, " * week")
+      } else {
+        fixed_formula <- paste0(fixed_formula, " + week")
+      }
+    } else {
+      message("Only one week detected. Week effects and interactions excluded from model.")
+    }
+    
+    if (input$lmer_include_concentration && length(unique(df$fiber_concentration)) >= 2) {
+      fixed_formula <- paste0(fixed_formula, " + fiber_concentration")
+    }
+    
+    # Build random effects formula based on selection
+    if (input$random_structure == "intercept") {
+      random_formula <- "(1|grouping_var)"
+      
+    } else if (input$random_structure == "batch") {
+      if (n_batch < 2) {
+        message("WARNING: experiment_batch has only ", n_batch, " level(s). Using simple random intercept instead.")
+        random_formula <- "(1|grouping_var)"
+      } else {
+        random_formula <- "(1|grouping_var) + (1|experiment_batch)"
+      }
+      
+    } else if (input$random_structure == "nested") {
+      if (input$lmer_dataset == "physical" && input$lmer_endpoint == "mf_counts") {
+        random_formula <- "(1|grouping_var/tissue_replicate)"
+      } else {
+        warning("Nested structure only applicable to mf_counts. Using simple random intercept.")
+        random_formula <- "(1|grouping_var)"
+      }
+      
+    } else if (input$random_structure == "full") {
+      if (n_batch < 2) {
+        message("WARNING: experiment_batch has only ", n_batch, " level(s). Excluding batch from model.")
+        if (input$lmer_dataset == "physical" && input$lmer_endpoint == "mf_counts") {
+          random_formula <- "(1|grouping_var/tissue_replicate)"
+        } else {
+          random_formula <- "(1|grouping_var)"
+        }
+      } else {
+        if (input$lmer_dataset == "physical" && input$lmer_endpoint == "mf_counts") {
+          random_formula <- "(1|experiment_batch) + (1|grouping_var/tissue_replicate)"
+        } else {
+          random_formula <- "(1|experiment_batch) + (1|grouping_var)"
+        }
+      }
+    }
+    
+    # Complete formula
+    full_formula <- paste(fixed_formula, "+", random_formula)
+    message("Fitting model: ", full_formula)
+    
+    # Fit model
+    model <- lmer(as.formula(full_formula), data = df)
+    
+    return(model)
+  })
+  
+  
+  
+  # Model summary
+  output$lmer_summary <- renderPrint({
+    model <- lmer_model()
+    summary(model)
+  })
+  
+  # Fixed effects ANOVA
+  output$lmer_anova_table <- renderDT({
+    model <- lmer_model()
+    anova_results <- anova(model)
+    
+    anova_df <- as.data.frame(anova_results) %>%
+      tibble::rownames_to_column("Term") %>%
+      mutate(across(where(is.numeric), ~signif(.x, 5)))
+    
+    datatable(anova_df, options = list(pageLength = 10))
+  })
+  
+  # Random effects summary
+  output$lmer_random_effects <- renderPrint({
+    model <- lmer_model()
+    cat("Random Effects Variance Components:\n\n")
+    print(VarCorr(model))
+    cat("\nNumber of observations:", nobs(model), "\n")
+    cat("Number of grouping levels:", 
+        length(unique(lmer_data()$grouping_var)), "\n")
+  })
+  
+  # Diagnostic plots
+  output$lmer_diagnostics <- renderPlot({
+    model <- lmer_model()
+    par(mfrow = c(2, 2))
+    
+    # Residuals vs Fitted
+    plot(fitted(model), residuals(model),
+         xlab = "Fitted Values", ylab = "Residuals",
+         main = "Residuals vs Fitted")
+    abline(h = 0, col = "red", lty = 2)
+    
+    # Q-Q plot
+    qqnorm(residuals(model), main = "Normal Q-Q Plot")
+    qqline(residuals(model), col = "red")
+    
+    # Scale-Location
+    plot(fitted(model), sqrt(abs(residuals(model))),
+         xlab = "Fitted Values", ylab = "Sqrt(|Residuals|)",
+         main = "Scale-Location")
+    
+    # Random effects Q-Q
+    re <- ranef(model)[[1]][,1]
+    qqnorm(re, main = "Random Effects Q-Q")
+    qqline(re, col = "red")
+  })
+  
+  # EM Means
+  lmer_emmeans_results <- eventReactive(input$run_lmer_emmeans, {
+    model <- lmer_model()
+    # Get names of fixed effects actually in the model
+    fe_terms <- attr(terms(model), "term.labels")
+    
+    has_week <- "week" %in% fe_terms
+    has_treat <- "treatment_category" %in% fe_terms
+    
+    # Choose the safest emmeans specification
+    if (input$lmer_emmeans_by == "treatment_category" && has_treat) {
+      emm <- emmeans(model, ~ treatment_category)
+    } else if (input$lmer_emmeans_by == "week" && has_week) {
+      emm <- emmeans(model, ~ week)
+    } else if (input$lmer_emmeans_by == "both" && has_week && has_treat) {
+      emm <- emmeans(model, ~ treatment_category | week)
+    } else {
+      # Fallback: whatever fixed effect exists
+      target <- if (has_treat) "treatment_category" else if (has_week) "week" else fe_terms[1]
+      message("EMMeans fallback using term: ", target)
+      emm <- emmeans(model, as.formula(paste("~", target)))
+    }
+    emm
+  })
+  
+  
+  # EM Means plot for MIXED EFFECTS
+  output$lmer_emmeans_plot <- renderPlot({
+    emm <- lmer_emmeans_results()
+    
+    df_emm <- as.data.frame(summary(emm, infer = TRUE))
+    if ("asymp.LCL" %in% names(df_emm)) {
+      df_emm <- df_emm %>% rename(lower.CL = asymp.LCL, upper.CL = asymp.UCL)
+    }
+    df_emm <- df_emm %>% filter(!is.na(emmean))
+    
+    if (nrow(df_emm) == 0) {
+      plot.new()
+      text(0.5, 0.5, "EM means not available after simplifying model.\nTry deselecting fiber_concentration or include more data.", cex = 1)
+      return()
+    }
+    
+    # Check we have required columns
+    if (!all(c("treatment_category", "emmean", "lower.CL", "upper.CL") %in% names(df_emm))) {
+      plot.new()
+      text(0.5, 0.5, "Error: Missing required columns in emmeans output", cex = 1.2)
+      return()
+    }
+    
+    # Build plot
+    p <- ggplot(df_emm, aes(x = treatment_category, y = emmean)) +
+      geom_point(size = 3, color = "#2c7fb8") +
+      geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+                    width = 0.25, linewidth = 1, color = "#2c7fb8") +
+      coord_flip() +
+      theme_minimal(base_size = 12) +
+      labs(
+        title = "Estimated Marginal Means (Mixed Model)",
+        subtitle = "Error bars show 95% confidence intervals",
+        x = NULL,
+        y = "Estimated Mean"
+      ) +
+      theme(
+        plot.title = element_text(face = "bold", size = 14),
+        axis.text.y = element_text(size = 11)
+      )
+    
+    # Add faceting if week exists with >1 level
+    if ("week" %in% names(df_emm) && length(unique(df_emm$week)) > 1) {
+      p <- p + facet_wrap(~ week, scales = "free_y")
+    }
+    
+    print(p)
+  })
+  
+  # EM Means table
+  output$lmer_emmeans_table <- renderDT({
+    emm <- lmer_emmeans_results()
+    emm_df <- as.data.frame(summary(emm, infer = TRUE)) %>%
+      mutate(across(where(is.numeric), ~signif(.x, 5)))
+    datatable(emm_df, options = list(pageLength = 10))
+  })
+  
+  
+  # Pairwise comparisons for MIXED EFFECTS
+  output$lmer_pairwise_table <- renderDT({
+    emm <- lmer_emmeans_results()
+    adj_method <- input$lmer_adjustment_method
+    
+    # Compute comparisons based on type and adjustment
+    if (input$lmer_comparison_type == "pairwise") {
+      pairs_result <- pairs(emm, adjust = adj_method)
+    } else if (input$lmer_comparison_type == "control") {
+      if (adj_method == "dunnett") {
+        pairs_result <- contrast(emm, method = "trt.vs.ctrl", ref = "Control", 
+                                 adjust = "dunnett")
+      } else {
+        pairs_result <- contrast(emm, method = "trt.vs.ctrl", ref = "Control", 
+                                 adjust = adj_method)
+      }
+    } else {
+      pairs_result <- pairs(emm, adjust = adj_method)
+    }
+    
+    # Convert to data frame and add significance column
+    pairs_df <- as.data.frame(pairs_result) %>%
+      mutate(
+        across(where(is.numeric), ~signif(.x, 5)),
+        Significant = if_else(p.value < 0.05, "Yes", "No"),  # ADD THIS LINE
+        Adjustment = adj_method
+      )
+    
+    # Display table
+    datatable(pairs_df,
+              options = list(pageLength = 20, scrollX = TRUE),
+              filter = "top") %>%
+      formatStyle("Significant",
+                  backgroundColor = styleEqual(c("Yes", "No"),
+                                               c("lightgreen", "white")))
+  })
+  
+  
+  # Download handler
+  output$download_lmer <- downloadHandler(
+    filename = function() {
+      paste0("mixed_model_", input$lmer_endpoint, "_", Sys.Date(), ".xlsx")
+    },
+    content = function(file) {
+      model <- lmer_model()
+      emm <- lmer_emmeans_results()
+      
+      wb_list <- list(
+        "Fixed_Effects" = broom.mixed::tidy(model, effects = "fixed"),
+        "Random_Effects" = broom.mixed::tidy(model, effects = "ran_pars"),
+        "ANOVA" = broom::tidy(anova(model)),
+        "EM_Means" = as.data.frame(emm),
+        "Pairwise" = as.data.frame(pairs(emm, adjust = input$lmer_adjustment_method))
+      )
+      
+      writexl::write_xlsx(wb_list, file)
+    }
+  )
+  
+} 
 shinyApp(ui, server)
