@@ -1,0 +1,41 @@
+# Optimization files for shinyapps.io deployment
+
+# .rsconnect-ignore file (place in your app directory)
+# This reduces bundle size by excluding unnecessary files
+
+# Development files
+*.Rproj
+.Rproj.user/
+.git/
+.gitignore
+README.md
+scratch/
+test/
+temp/
+dev/
+
+# Documentation
+*.md
+*.pdf
+docs/
+
+# Raw data files (use RDS instead)
+*.xlsx
+*.csv
+*.xls
+
+# Large files
+*.zip
+*.tar.gz
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+.Rhistory
+
+# Cache
+cache/
+.cache/
