@@ -205,3 +205,81 @@ summarize_inter <- function(df, threshold) {
     ) %>%
     dplyr::select(-has_inf, -has_zero, -has_na, -vals)
 }
+
+process_assay_data_for_recovery <- function(df) {
+  df %>%
+    dplyr::mutate(
+      # Extract week components
+      week_start = as.numeric(stringr::str_extract(sample_week, "^[0-9]+")),
+      week_end = as.numeric(stringr::str_extract(sample_week, "[0-9]+$")),
+      well_number = as.numeric(stringr::str_extract(well_name, "[0-9]+")),
+      well_letter = stringr::str_extract(well_name, "[A-H]"),
+      
+      # Apply the EXACT same week splitting logic as convert_data_debugged.R
+      week = dplyr::case_when(
+        well_number <= 6 & well_letter %in% c("A", "B") ~ week_start,
+        well_number <= 6 & well_letter %in% c("C", "D", "E", "F", "G", "H") ~ week_end,
+        well_number > 6 ~ week_start,
+        well_number > 6 ~ week_end,
+        TRUE ~ NA_real_
+      ),
+      
+      # Apply the EXACT same tank assignment logic as convert_data_debugged.R
+      tank = dplyr::case_when(
+        well_number <= 5 & well_letter %in% c("A", "B") ~ (well_number - 1) %/% 4 + 1,
+        well_number <= 5 & well_letter %in% c("C", "D") ~ (well_number - 1) %/% 4 + 2,
+        well_number <= 5 & well_letter %in% c("E", "F") ~ (well_number - 1) %/% 4 + 3,
+        well_number <= 5 & well_letter %in% c("G", "H") ~ (well_number - 1) %/% 4 + 4,
+        well_number > 6 & well_letter %in% c("A", "B") ~ 21,
+        well_number > 6 & well_letter %in% c("C", "D") ~ 1,
+        well_number > 6 & well_letter %in% c("E", "F") ~ 2,
+        well_number > 6 & well_letter %in% c("G", "H") ~ 3,
+        well_number > 6 & well_letter %in% c("A", "B") ~ (well_number - 7) %/% 4 + 4,
+        well_number > 6 & well_letter %in% c("C", "D") ~ (well_number - 7) %/% 4 + 5,
+        well_number > 6 & well_letter %in% c("E", "F") ~ (well_number - 7) %/% 4 + 6,
+        well_number > 6 & well_letter %in% c("G", "H") ~ (well_number - 7) %/% 4 + 7,
+        TRUE ~ NA_real_
+      ),
+      
+      # Apply the EXACT same treatment logic as convert_data_debugged.R
+      fiber_concentration = dplyr::case_when(
+        tank %in% c(1, 2, 3) ~ "0",
+        tank %in% c(4, 5, 6, 13, 14, 15) ~ "100",
+        tank %in% c(7, 8, 9, 16, 17, 18) ~ "1000",
+        tank %in% c(10, 11, 12, 19, 20, 21) ~ "10000",
+        TRUE ~ NA_character_
+      ),
+      
+      treatment = dplyr::case_when(
+        tank %in% c(1, 2, 3) ~ "Control",
+        tank > 12 & !tank %in% c(1, 2, 3) ~ "Untreated",
+        tank <= 12 ~ "Treated",
+        TRUE ~ NA_character_
+      ),
+      
+      fiber_group = ifelse(treatment == "Control" | fiber_concentration == "0", 
+                           "Control", 
+                           paste(fiber_type, treatment))
+    ) %>%
+    # Remove temporary columns
+    dplyr::select(-week_start, -week_end, -well_number, -well_letter) %>%
+    # Remove rows with missing weeks or tanks
+    dplyr::filter(!is.na(week), !is.na(tank)) %>%
+    # Arrange like the original processing
+    dplyr::arrange(fiber_type, week, tank) %>%
+    tibble::as_tibble()
+}
+
+# Canonicalize fiber concentrations to {0,100,1000,10000} as character labels
+canonicalize_concentration <- function(x) {
+  v <- suppressWarnings(as.numeric(x))              # tolerate "100.0", factors, etc.
+  allowed <- c(0, 100, 1000, 10000)
+  # Snap to nearest allowed within a 1% (or 1 unit) tolerance
+  snapped <- vapply(v, function(y) {
+    if (!is.finite(y)) return(NA_real_)
+    idx <- which.min(abs(allowed - y))
+    tol <- max(1, 0.01 * allowed[idx])
+    if (abs(allowed[idx] - y) <= tol) allowed[idx] else y
+  }, numeric(1))
+  as.character(as.integer(round(snapped)))          # canonical string labels
+}
