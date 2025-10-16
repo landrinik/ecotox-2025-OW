@@ -283,3 +283,123 @@ canonicalize_concentration <- function(x) {
   }, numeric(1))
   as.character(as.integer(round(snapped)))          # canonical string labels
 }
+
+# =============================================================================
+# Create 14-level combined treatment variable (UNIFIED VERSION)
+# =============================================================================
+#' Combines fiber_type, chem_treatment, and concentration into one categorical variable
+#' to avoid collinearity issues with control groups
+#' 
+#' @param data Data frame containing fiber_type, chem_treatment, concentration, is_control
+#' @param reference_level Which level should be the reference (default: "Control Cotton")
+#' @return Data frame with new 'treatment_combined' variable
+
+create_combined_treatment <- function(data, reference_level = "Control Cotton") {
+  df <- data
+  
+  # Map legacy snake_case if needed, without clobbering existing columns
+  if (!"fiber_type" %in% names(df) && "fibertype" %in% names(df)) {
+    df <- dplyr::rename(df, fiber_type = fibertype)
+  }
+  if (!"chem_treatment" %in% names(df) && "chemtreatment" %in% names(df)) {
+    df <- dplyr::rename(df, chem_treatment = chemtreatment)
+  }
+  if (!"is_control" %in% names(df) && "iscontrol" %in% names(df)) {
+    df <- dplyr::rename(df, is_control = iscontrol)
+  }
+  
+  # Ensure a discrete 'concentration' column exists (snap to {0,100,1000,10000})
+  if (!"concentration" %in% names(df)) {
+    # Only coalesce from columns that actually exist and have length > 0
+    candidates <- list()
+    
+    if ("fiber_concentration_numeric" %in% names(df)) {
+      candidates[[length(candidates) + 1]] <- suppressWarnings(as.numeric(df[["fiber_concentration_numeric"]]))
+    }
+    if ("fiber_concentration" %in% names(df)) {
+      candidates[[length(candidates) + 1]] <- suppressWarnings(as.numeric(df[["fiber_concentration"]]))
+    }
+    # Only add dose columns if they exist
+    if ("dose_log10" %in% names(df)) {
+      candidates[[length(candidates) + 1]] <- suppressWarnings(as.numeric(df[["dose_log10"]]))
+    }
+    if ("doselog10" %in% names(df)) {
+      candidates[[length(candidates) + 1]] <- suppressWarnings(as.numeric(df[["doselog10"]]))
+    }
+    
+    # Coalesce only if we have at least one candidate of correct length
+    if (length(candidates) == 0 || all(vapply(candidates, length, integer(1)) == 0)) {
+      # Fallback: create 0-vector of correct length
+      conc_num <- rep(0, nrow(df))
+    } else {
+      # Filter out zero-length vectors before coalescing
+      candidates <- Filter(function(x) length(x) == nrow(df), candidates)
+      conc_num <- do.call(dplyr::coalesce, candidates)
+      if (length(conc_num) == 0 || all(is.na(conc_num))) {
+        conc_num <- rep(0, nrow(df))
+      }
+    }
+    
+    df[["concentration"]] <- canonicalize_concentration(conc_num)
+  }
+  
+  # *** FIXED: Build with consistent casing - lowercase matching ***
+  # Standardize fiber_type and chem_treatment to lowercase for robust matching
+  df <- df %>%
+    dplyr::mutate(
+      fiber_type_lower = tolower(as.character(fiber_type)),
+      chem_treatment_lower = tolower(as.character(chem_treatment)),
+      concentration_char = as.character(concentration)
+    )
+  
+  # Build the combined treatment variable with explicit case_when
+  df <- df %>%
+    dplyr::mutate(
+      treatment_combined = dplyr::case_when(
+        # Control groups - use "Control Cotton" and "Control Pet" (not PET)
+        is_control == 1 & fiber_type_lower == "cotton" ~ "Control Cotton",
+        is_control == 1 & fiber_type_lower == "pet" ~ "Control Pet",
+        
+        # Cotton treatments
+        fiber_type_lower == "cotton" & chem_treatment_lower == "untreated" & concentration_char == "100" ~ "Untreated Cotton 100 mfL",
+        fiber_type_lower == "cotton" & chem_treatment_lower == "untreated" & concentration_char == "1000" ~ "Untreated Cotton 1000 mfL",
+        fiber_type_lower == "cotton" & chem_treatment_lower == "untreated" & concentration_char == "10000" ~ "Untreated Cotton 10000 mfL",
+        fiber_type_lower == "cotton" & chem_treatment_lower == "treated" & concentration_char == "100" ~ "Treated Cotton 100 mfL",
+        fiber_type_lower == "cotton" & chem_treatment_lower == "treated" & concentration_char == "1000" ~ "Treated Cotton 1000 mfL",
+        fiber_type_lower == "cotton" & chem_treatment_lower == "treated" & concentration_char == "10000" ~ "Treated Cotton 10000 mfL",
+        
+        # PET treatments - use "Pet" (not "PET") to match str_to_title behavior
+        fiber_type_lower == "pet" & chem_treatment_lower == "untreated" & concentration_char == "100" ~ "Untreated Pet 100 mfL",
+        fiber_type_lower == "pet" & chem_treatment_lower == "untreated" & concentration_char == "1000" ~ "Untreated Pet 1000 mfL",
+        fiber_type_lower == "pet" & chem_treatment_lower == "untreated" & concentration_char == "10000" ~ "Untreated Pet 10000 mfL",
+        fiber_type_lower == "pet" & chem_treatment_lower == "treated" & concentration_char == "100" ~ "Treated Pet 100 mfL",
+        fiber_type_lower == "pet" & chem_treatment_lower == "treated" & concentration_char == "1000" ~ "Treated Pet 1000 mfL",
+        fiber_type_lower == "pet" & chem_treatment_lower == "treated" & concentration_char == "10000" ~ "Treated Pet 10000 mfL",
+        
+        TRUE ~ "Other"
+      )
+    ) %>%
+    # Remove temporary columns
+    dplyr::select(-fiber_type_lower, -chem_treatment_lower, -concentration_char)
+  
+  # Convert to factor with specified reference level first
+  if (!is.null(reference_level) && reference_level %in% unique(df$treatment_combined)) {
+    all_levels <- c(
+      reference_level,
+      setdiff(unique(df$treatment_combined), c(reference_level, "Other"))
+    )
+    df$treatment_combined <- factor(df$treatment_combined, levels = all_levels)
+  } else {
+    # If reference not found, just make it a factor
+    df$treatment_combined <- factor(df$treatment_combined)
+  }
+  
+  # Print summary
+  cat("\n=== Combined Treatment Variable Created ===\n")
+  cat("Reference level:", reference_level, "\n\n")
+  cat("Level counts:\n")
+  print(table(df$treatment_combined))
+  cat("\n")
+  
+  return(df)
+}

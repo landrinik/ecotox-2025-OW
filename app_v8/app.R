@@ -233,6 +233,174 @@ ui <- fluidPage(
                 
               ),
         
+        # ---------------------------------------------------------------------------
+        # Combined Treatment Analysis tab (UI)
+        # ---------------------------------------------------------------------------
+        tabPanel(
+          "Combined Treatment Analysis",
+          icon = icon("layer-group"),
+          br(),
+          h3("14-Level Combined Treatment Model", style = "color:#2c3e50; font-weight: bold;"),
+          
+          # Data selection and setup
+          wellPanel(
+            h5(icon("filter"), "Data Selection", style = "margin-top:0;"),
+            fluidRow(
+              column(
+                4,
+                # Endpoint selector
+                selectInput(
+                  "combined_endpoint",
+                  "Select Endpoint",
+                  choices = c("Loading..." = "loading")  # updated in server
+                )
+              ),
+              column(
+                4,
+                # Weeks to include
+                checkboxGroupInput(
+                  "combined_weeks",
+                  "Select Weeks",
+                  choices = c("1" = "1", "3" = "3", "5" = "5"),
+                  selected = c("1", "3", "5"),
+                  inline = TRUE
+                )
+              ),
+              column(
+                4,
+                # Quick data status
+                textOutput("combined_data_info"),
+                tags$style("#combined_data_info { font-weight: bold; margin-top: 25px; font-size: 14px; }")
+              )
+            ),
+            hr(),
+            h4("Model Setup"),
+            fluidRow(
+              column(
+                4,
+                # Reference level for combined factor
+                selectInput(
+                  "combined_reference",
+                  "Reference Level",
+                  choices = c(
+                    "Control Cotton" = "Control Cotton",
+                    "Control PET" = "Control PET",
+                    "Untreated Cotton 100 mfL" = "Untreated Cotton 100 mfL",
+                    "Treated Cotton 100 mfL"   = "Treated Cotton 100 mfL"
+                  ),
+                  selected = "Control Cotton"
+                )
+              ),
+              column(
+                4,
+                checkboxInput("combined_include_week", "Include Week (Time) Variable", value = FALSE)
+              ),
+              column(
+                4,
+                # Only show the weeks control once; the primary one above is used
+                # Left intentionally blank to keep layout aligned
+                div()
+              )
+            ),
+            fluidRow(
+              column(
+                6,
+                actionButton(
+                  "run_combined_model",
+                  "Run Combined Treatment Model",
+                  icon = icon("play"),
+                  class = "btn-primary btn-lg",
+                  style = "width:100%; margin-top:10px;"
+                )
+              ),
+              column(
+                6,
+                # Enable download only after a model has been run
+                conditionalPanel(
+                  condition = "input.run_combined_model > 0",
+                  downloadButton(
+                    "download_combined_results",
+                    "Download Results",
+                    class = "btn-success btn-lg",
+                    style = "width:100%; margin-top:10px;"
+                  )
+                )
+              )
+            )
+          ),
+          
+          # Model Results gated by button click to avoid circular dependency on outputs
+          h4("Model Results"),
+          conditionalPanel(
+            condition = "input.run_combined_model > 0",
+            tabsetPanel(
+              id = "combined_results_tabs",
+              
+              tabPanel(
+                "Model Summary",
+                br(),
+                h5("Combined Treatment Variable Levels"),
+                verbatimTextOutput("combined_treatment_levels"),
+                br(),
+                h5("Model Coefficients"),
+                verbatimTextOutput("combined_model_summary"),
+                br(),
+                h5("ANOVA Table"),
+                verbatimTextOutput("combined_anova")
+              ),
+              
+              tabPanel(
+                "Estimated Means",
+                br(),
+                h5("Estimated Marginal Means by Treatment Level"),
+                DT::dataTableOutput("combined_emm"),
+                br(),
+                plotOutput("combined_emm_plot", height = "600px")
+              ),
+              
+              tabPanel(
+                "Pairwise Comparisons",
+                br(),
+                fluidRow(
+                  column(4,
+                         selectInput(
+                           "combined_comparison_filter",
+                           "Filter Comparisons",
+                           choices = c(
+                             "All Comparisons" = "all",
+                             "vs. Reference Only" = "ref",
+                             "Within Fiber vs Control" = "fiber_control",
+                             "Within Fiber Type" = "fiber",
+                             "Within Concentration" = "conc"
+                           ),
+                           selected = "fiber_control"
+                         )
+                  ),
+                  column(4,
+                         numericInput(
+                           "combined_alpha",
+                           "Significance Level",
+                           value = 0.05,
+                           min = 0.001,
+                           max = 0.1,
+                           step = 0.01
+                         )
+                  )
+                ),
+                DT::dataTableOutput("combined_pairwise"),
+                br(),
+                plotOutput("combined_pairwise_plot", height = "700px")
+              ),
+              
+              tabPanel(
+                "Diagnostics",
+                br(),
+                plotOutput("combined_diagnostics", height = "800px")
+              )
+            )
+          )
+        ),
+        
         # Mixed Effects Analysis Tab
         tabPanel("Mixed Effects Analysis",
                 sidebarLayout(
@@ -1600,6 +1768,840 @@ server <- function(input, output, session) {
       text(0.5, 0.5, paste("Error creating plot:\n", conditionMessage(e)), 
            cex = 1.1, col = "#d9534f")
     })
+  })
+  
+  # =============================================================================
+  # Combined Treatment Analysis (server)
+  # - Uses snake_case IDs
+  # - Harmonizes legacy/snake_case columns
+  # - Avoids circular gating by rendering even when hidden and gating by button
+  # =============================================================================
+  
+  # Small helper to format a quick data status line in the UI
+  output$combined_data_info <- renderText({
+    if (is.null(input$combined_endpoint) || identical(input$combined_endpoint, "loading")) {
+      return("No data loaded")  # initial state
+    }
+    # Try to count rows safely
+    n <- tryCatch({
+      df <- combined_base_data()
+      if (is.null(df)) 0L else nrow(df)
+    }, error = function(e) 0L)
+    if (n > 0L) paste0(format(n, big.mark = ","), " observations loaded") else "No data for selected endpoint"
+  })
+  
+  # -----------------------------------------------------------------------------
+  # REACTIVE: Base data for combined analysis
+  # -----------------------------------------------------------------------------
+  combined_base_data <- reactive({
+    req(input$combined_endpoint)
+    req(input$active_dataset)  # ensure your sidebar id uses snake_case
+    
+    cat("\n=== combined_base_data reactive triggered ===\n")
+    cat("Dataset:", input$active_dataset, "\n")
+    cat("Endpoint:", input$combined_endpoint, "\n")
+    
+    if (identical(input$active_dataset, "assay")) {
+      req(final_data)
+      df <- final_data %>%
+        create_enhanced_treatment_categories() %>%        # adds fiber/treatment normalization
+        dplyr::mutate(outcome = calculated_concentration)
+      
+      # CRITICAL: Convert outcome to numeric and drop invalid rows BEFORE averaging
+      df <- df %>%
+        dplyr::mutate(
+          outcome = suppressWarnings(as.numeric(outcome))
+        ) %>%
+        dplyr::filter(!is.na(outcome))
+      
+      # Now filter and average replicates
+      df <- df %>%
+        dplyr::filter(assay_type == input$combined_endpoint) %>%
+        average_assay_replicates(outcome)               # NSE, no quotes
+      
+      cat("Assay data filtered. Rows:", nrow(df), "\n")
+      
+    } else if (identical(input$active_dataset, "physical")) {
+      req(physical_master)
+      df <- physical_master %>%
+        create_enhanced_treatment_categories() %>%
+        dplyr::mutate(outcome = value) %>%
+        dplyr::filter(endpoint == input$combined_endpoint)
+      cat("Physical data filtered. Rows:", nrow(df), "\n")
+      
+    } else {
+      stop("Invalid dataset selection")
+    }
+    
+    # Weeks filter and normalization
+    wks <- input$combined_weeks
+    if (is.null(wks) || length(wks) == 0) {
+      wks <- c("1", "3", "5")
+      cat("No weeks selected, using default: 1, 3, 5\n")
+    }
+    
+    df <- df %>%
+      dplyr::filter(as.character(week) %in% wks) %>%
+      normalize_controls_and_dose() %>%
+      droplevels()
+    
+    cat("After week filter and normalization. Final rows:", nrow(df), "\n")
+    cat("Columns:", paste(names(df), collapse = ", "), "\n\n")
+    df
+  })
+  
+  # =============================================================================
+  # Combined Treatment Analysis: Harmonize and build 14-level factor
+  # =============================================================================
+  combined_data <- reactive({
+    df <- combined_base_data()
+    req(df, nrow(df) > 0)
+    
+    # 1) Harmonize column names
+    if ("fibertype" %in% names(df) && !"fiber_type" %in% names(df)) {
+      df <- dplyr::rename(df, fiber_type = fibertype)
+    }
+    if ("chemtreatment" %in% names(df) && !"chem_treatment" %in% names(df)) {
+      df <- dplyr::rename(df, chem_treatment = chemtreatment)
+    }
+    if ("iscontrol" %in% names(df) && !"is_control" %in% names(df)) {
+      df <- dplyr::rename(df, is_control = iscontrol)
+    }
+    
+    # 2) Build fiber_concentration_numeric ONLY from columns that exist
+    if (!"fiber_concentration_numeric" %in% names(df)) {
+      # Start with a fallback column of zeros
+      fcn <- rep(0, nrow(df))
+      
+      # Overwrite with first available numeric source
+      if ("fiber_concentration" %in% names(df)) {
+        tmp <- suppressWarnings(as.numeric(df[["fiber_concentration"]]))
+        if (length(tmp) == nrow(df)) fcn <- dplyr::coalesce(tmp, fcn)
+      }
+      # Do NOT reference dose_log10/doselog10 unless they exist
+      # (combined_base_data likely doesn't have them)
+      
+      df[["fiber_concentration_numeric"]] <- fcn
+    }
+    
+    # 3) Call the wrapper to create the combined factor
+    df_combined <- create_combined_treatment(
+      data = df,
+      reference_level = input$combined_reference
+    )
+    
+    # 4) Normalize final names
+    if ("treatmentcombined" %in% names(df_combined) && !"treatment_combined" %in% names(df_combined)) {
+      df_combined <- dplyr::rename(df_combined, treatment_combined = treatmentcombined)
+    }
+    
+    # 5) *** FIXED: TRIM WHITESPACE FROM treatment_combined FACTOR ***
+    # This fixes the "Control Cotton " (with trailing space) issue
+    if ("treatment_combined" %in% names(df_combined)) {
+      df_combined <- df_combined %>%
+        dplyr::mutate(
+          # Convert to character, trim whitespace, then back to factor
+          treatment_combined = stringr::str_trim(as.character(treatment_combined)),
+          # Re-factorize with cleaned levels
+          treatment_combined = factor(
+            treatment_combined,
+            levels = unique(stringr::str_trim(as.character(treatment_combined)))
+          )
+        )
+      
+      # Remove "Other" or NA levels if present
+      df_combined <- df_combined %>%
+        dplyr::filter(!is.na(treatment_combined), treatment_combined != "Other")
+      
+      # Drop unused factor levels after filtering
+      df_combined$treatment_combined <- droplevels(df_combined$treatment_combined)
+    }
+    
+    # 6) Final validation
+    req("outcome" %in% names(df_combined), "treatment_combined" %in% names(df_combined))
+    req(nrow(df_combined) > 0)  # Also check we have data left after filtering
+    
+    df_combined
+  })
+  
+  # =============================================================================
+  #         OBSERVER TO DYNAMICALLY UPDATE THE REFERENCE LEVEL CHOICES
+  # =============================================================================
+  
+  observe({
+    # Trigger when combined_base_data changes (endpoint/week selection)
+    req(input$combined_endpoint, length(input$combined_weeks) > 0)
+    
+    tryCatch({
+      # Get the actual data
+      data <- combined_data()
+      
+      if (!is.null(data) && "treatment_combined" %in% names(data)) {
+        # Get actual levels from the data
+        all_levels <- levels(data$treatment_combined)
+        
+        # Filter to only control groups (levels that start with "Control")
+        control_levels <- all_levels[stringr::str_detect(all_levels, "^Control")]
+        
+        # If no control levels found, fall back to first level
+        if (length(control_levels) == 0) {
+          control_levels <- all_levels[1]
+        }
+        
+        # Update the selectInput with only control levels
+        updateSelectInput(
+          session,
+          "combined_reference",
+          choices = control_levels,
+          selected = control_levels[1]  # Default to first control
+        )
+        
+        cat("✓ Reference level options updated:", paste(control_levels, collapse = ", "), "\n")
+      }
+    }, error = function(e) {
+      # Silently fail if data not ready
+      NULL
+    })
+  }) %>%
+    bindEvent(input$combined_endpoint, input$combined_weeks)
+  
+  # --- Fit the model -----------------------------------------------------------
+  combined_model <- eventReactive(input$run_combined_model, {
+    data <- combined_data()
+    req(data, nrow(data) > 0)
+    
+    # Get reference level from input
+    ref_level <- input$combined_reference
+    
+    # Ensure reference level exists in data
+    if (!(ref_level %in% unique(data$treatment_combined))) {
+      showNotification(
+        paste("Reference level", ref_level, "not found in data."),
+        type = "warning"
+      )
+      ref_level <- levels(data$treatment_combined)[1]
+    }
+    
+    # Relevel the factor with the selected reference
+    data$treatment_combined <- stats::relevel(
+      data$treatment_combined,
+      ref = ref_level
+    )
+    
+    # Check that we have enough levels
+    n_lvls <- nlevels(droplevels(data$treatment_combined))
+    validate(
+      need(n_lvls >= 2, 
+           sprintf("Not enough treatment levels after filtering (have %d). Try different weeks or endpoint.", n_lvls))
+    )
+    
+    # Build formula
+    f <- if (isTRUE(input$combined_include_week)) {
+      stats::as.formula("outcome ~ treatment_combined + week")
+    } else {
+      stats::as.formula("outcome ~ treatment_combined")
+    }
+    
+    # Fit model
+    stats::lm(f, data = data)
+  })
+  
+  # --- Outputs: keep ids consistent with UI and use validate() -----------------
+  output$combined_treatment_levels <- renderPrint({
+    data <- combined_data()
+    validate(need(nrow(data) > 0, "No rows available for the selected filters."))
+    level_summary <- data %>%
+      dplyr::group_by(treatment_combined) %>%
+      dplyr::summarise(
+        n = dplyr::n(),
+        mean_value = mean(outcome, na.rm = TRUE),
+        sd_value   = stats::sd(outcome, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::arrange(treatment_combined)
+    print(level_summary, n = Inf)
+  })
+  
+  output$combined_model_summary <- renderPrint({
+    mdl <- combined_model()
+    validate(need(!is.null(mdl), "Click Run to fit the model, or check data/endpoint selection."))
+    print(summary(mdl))
+  })
+  
+  output$combined_anova <- renderPrint({
+    mdl <- combined_model()
+    validate(need(!is.null(mdl), "Model not available."))
+    print(stats::anova(mdl))
+  })
+  
+  # ============================================================================
+  # COMBINED MODEL: EMMEANS CALCULATION (Reactive)
+  # ============================================================================
+  
+  combined_emmeans_data <- eventReactive(input$run_combined_model, {
+    mdl <- combined_model()
+    validate(need(!is.null(mdl), "Model not available"))
+    
+    tryCatch({
+      # Calculate emmeans for treatment_combined factor
+      emm <- emmeans::emmeans(mdl, specs = ~ treatment_combined)
+      
+      # Convert to data frame
+      emm_df <- as.data.frame(emm) %>%
+        dplyr::mutate(dplyr::across(where(is.numeric), ~signif(.x, 4)))
+      
+      list(
+        emmeans = emm,
+        emmeans_df = emm_df
+      )
+    }, error = function(e) {
+      message("Emmeans calculation error: ", e$message)
+      list(error = e$message)
+    })
+  })
+  
+  # ============================================================================
+  # COMBINED MODEL: PAIRWISE COMPARISONS (Reactive)
+  # ============================================================================
+  
+  combined_pairwise_data <- eventReactive(input$run_combined_model, {
+    emm_res <- combined_emmeans_data()
+    validate(need(!is.null(emm_res$emmeans), "Calculate emmeans first"))
+    
+    tryCatch({
+      emm <- emm_res$emmeans
+      ref_level <- input$combined_reference
+      filter_type <- input$combined_comparison_filter
+      
+      # Calculate all pairwise comparisons
+      pw <- emmeans::contrast(emm, method = "pairwise", adjust = "tukey")
+      pw_df <- as.data.frame(pw)
+      
+      # Add significance indicator
+      pw_df <- pw_df %>%
+        dplyr::mutate(
+          significant = dplyr::case_when(
+            p.value < 0.001 ~ "***",
+            p.value < 0.01 ~ "**",
+            p.value < 0.05 ~ "*",
+            TRUE ~ ""
+          )
+        )
+      
+      # Apply filtering based on user selection
+      if (filter_type == "ref") {
+        # Only comparisons vs reference
+        pw_df <- pw_df %>%
+          dplyr::filter(stringr::str_detect(contrast, stringr::fixed(ref_level)))
+      } else if (filter_type == "fiber") {
+        # Within fiber type: Cotton vs Cotton, PET vs PET
+        pw_df <- pw_df %>%
+          dplyr::filter(
+            (stringr::str_detect(contrast, "Cotton") & 
+               stringr::str_count(contrast, "Cotton") == 2) |
+              (stringr::str_detect(contrast, "PET|Pet") & 
+                 stringr::str_count(contrast, "PET|Pet") >= 2)
+          )
+      } else if (filter_type == "conc") {
+        # Within concentration only
+        pw_df <- pw_df %>%
+          dplyr::mutate(
+            # Extract concentration from each side of contrast
+            conc1 = stringr::str_extract(contrast, "\\d+(?= mfL)"),
+            conc2 = stringr::str_extract(
+              stringr::str_remove(contrast, "^[^-]+ - "), 
+              "\\d+(?= mfL)"
+            )
+          ) %>%
+          dplyr::filter(conc1 == conc2 | (is.na(conc1) & is.na(conc2))) %>%
+          dplyr::select(-conc1, -conc2)
+      }
+      # else filter_type == "all", keep everything
+      
+      # Format numeric columns
+      pw_df <- pw_df %>%
+        dplyr::mutate(dplyr::across(where(is.numeric), ~signif(.x, 4)))
+      
+      list(
+        pairwise = pw,
+        pairwise_df = pw_df
+      )
+    }, error = function(e) {
+      message("Pairwise comparison error: ", e$message)
+      list(error = e$message)
+    })
+  })
+  
+  # ============================================================================
+  #         CUSTOM CONTRAST OPTION FOR WITHIN-FIBER COMPARISONS
+  # ============================================================================
+  
+  combined_fiber_contrasts <- eventReactive(input$run_combined_model, {
+    emm_res <- combined_emmeans_data()
+    validate(need(!is.null(emm_res$emmeans), "Calculate emmeans first"))
+    
+    tryCatch({
+      emm <- emm_res$emmeans
+      emm_df <- as.data.frame(emm)
+      
+      # Separate Cotton and PET groups
+      cotton_levels <- emm_df %>%
+        dplyr::filter(stringr::str_detect(treatment_combined, "Cotton")) %>%
+        dplyr::pull(treatment_combined)
+      
+      pet_levels <- emm_df %>%
+        dplyr::filter(stringr::str_detect(treatment_combined, "PET|Pet")) %>%
+        dplyr::pull(treatment_combined)
+      
+      # Build contrast lists
+      contrast_list <- list()
+      
+      # Cotton vs Cotton Control
+      cotton_control <- cotton_levels[stringr::str_detect(cotton_levels, "Control")]
+      if (length(cotton_control) > 0 && length(cotton_levels) > 1) {
+        other_cotton <- setdiff(cotton_levels, cotton_control)
+        for (level in other_cotton) {
+          contrast_name <- paste(level, "-", cotton_control)
+          contrast_list[[contrast_name]] <- emmeans::contrast(
+            emm,
+            method = list(setNames(
+              c(-1, 1)[match(c(cotton_control, level), levels(emm@levels$treatment_combined))],
+              c(cotton_control, level)
+            ))
+          )
+        }
+      }
+      
+      # PET vs PET Control
+      pet_control <- pet_levels[stringr::str_detect(pet_levels, "Control")]
+      if (length(pet_control) > 0 && length(pet_levels) > 1) {
+        other_pet <- setdiff(pet_levels, pet_control)
+        for (level in other_pet) {
+          contrast_name <- paste(level, "-", pet_control)
+          contrast_list[[contrast_name]] <- emmeans::contrast(
+            emm,
+            method = list(setNames(
+              c(-1, 1)[match(c(pet_control, level), levels(emm@levels$treatment_combined))],
+              c(pet_control, level)
+            ))
+          )
+        }
+      }
+      
+      # Combine into single data frame if we have contrasts
+      if (length(contrast_list) > 0) {
+        # Use Tukey-adjusted pairwise within each fiber type
+        cotton_contrast <- if (length(other_cotton) > 0) {
+          emmeans::contrast(
+            emm,
+            method = "trt.vs.ctrl",
+            ref = which(levels(emm@levels$treatment_combined) == cotton_control)
+          ) %>% as.data.frame()
+        } else NULL
+        
+        pet_contrast <- if (length(other_pet) > 0) {
+          emmeans::contrast(
+            emm,
+            method = "trt.vs.ctrl",
+            ref = which(levels(emm@levels$treatment_combined) == pet_control)
+          ) %>% as.data.frame()
+        } else NULL
+        
+        contrast_df <- dplyr::bind_rows(
+          cotton_contrast,
+          pet_contrast
+        ) %>%
+          dplyr::mutate(
+            significant = dplyr::case_when(
+              p.value < 0.001 ~ "***",
+              p.value < 0.01 ~ "**",
+              p.value < 0.05 ~ "*",
+              TRUE ~ ""
+            )
+          ) %>%
+          dplyr::mutate(dplyr::across(where(is.numeric), ~signif(.x, 4)))
+        
+        return(list(success = TRUE, contrast_df = contrast_df))
+      } else {
+        return(list(success = FALSE, message = "No within-fiber contrasts available"))
+      }
+      
+    }, error = function(e) {
+      message("Fiber contrast error: ", e$message)
+      list(success = FALSE, error = e$message)
+    })
+  })
+  
+  # ============================================================================
+  # OUTPUT: COMBINED EMMEANS TABLE
+  # ============================================================================
+  
+  output$combined_emm <- DT::renderDataTable({
+    emm_res <- combined_emmeans_data()
+    validate(need(!is.null(emm_res$emmeans_df), "Click Run to calculate emmeans"))
+    
+    df <- emm_res$emmeans_df
+    
+    DT::datatable(
+      df,
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        dom = "Blfrtip",
+        columnDefs = list(
+          list(className = 'dt-center', targets = "_all")
+        )
+      ),
+      rownames = FALSE,
+      caption = "Estimated Marginal Means for Combined Treatment Levels"
+    ) %>%
+      DT::formatRound(
+        columns = c("emmean", "SE", "lower.CL", "upper.CL"),
+        digits = 4
+      )
+  })
+  
+  # ============================================================================
+  # OUTPUT: COMBINED EMMEANS PLOT
+  # ============================================================================
+  
+  output$combined_emm_plot <- renderPlot({
+    emm_res <- combined_emmeans_data()
+    validate(need(!is.null(emm_res$emmeans_df), "Model not available"))
+    
+    df <- emm_res$emmeans_df
+    
+    # Add color coding by fiber type
+    df <- df %>%
+      dplyr::mutate(
+        fiber_type = dplyr::case_when(
+          stringr::str_detect(treatment_combined, "Cotton") ~ "Cotton",
+          stringr::str_detect(treatment_combined, "Pet") ~ "PET",  # Changed from "PET"
+          TRUE ~ "Control"
+        ),
+        treatment_type = dplyr::case_when(
+          stringr::str_detect(treatment_combined, "Treated") ~ "Treated",
+          stringr::str_detect(treatment_combined, "Untreated") ~ "Untreated",
+          TRUE ~ "Control"
+        )
+      )
+    
+    # Check what fiber types actually exist in the data
+    actual_fiber_types <- unique(df$fiber_type)
+    
+    # Create color palette only for existing types
+    color_palette <- c()
+    if ("Cotton" %in% actual_fiber_types) color_palette["Cotton"] <- "#2E7D32"
+    if ("PET" %in% actual_fiber_types) color_palette["PET"] <- "#1565C0"
+    if ("Control" %in% actual_fiber_types) color_palette["Control"] <- "#757575"
+    
+    # Reorder for better visualization
+    df$treatment_combined <- forcats::fct_reorder(df$treatment_combined, df$emmean)
+    
+    ggplot2::ggplot(df, ggplot2::aes(x = emmean, y = treatment_combined, color = fiber_type)) +
+      ggplot2::geom_point(size = 4) +
+      ggplot2::geom_errorbarh(
+        ggplot2::aes(xmin = lower.CL, xmax = upper.CL),
+        height = 0.3,
+        linewidth = 1
+      ) +
+      ggplot2::scale_color_manual(values = color_palette) +  # Use dynamic palette
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::labs(
+        title = "Estimated Marginal Means with 95% Confidence Intervals",
+        subtitle = paste("Reference:", input$combined_reference),
+        x = "Estimated Mean (Outcome)",
+        y = "Treatment Group",
+        color = "Fiber Type"
+      ) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(size = 16, face = "bold"),
+        plot.subtitle = ggplot2::element_text(size = 12),
+        axis.text.y = ggplot2::element_text(size = 11),
+        panel.grid.minor = ggplot2::element_blank(),
+        legend.position = "right"
+      )
+  })
+  
+  # ============================================================================
+  # OUTPUT: COMBINED PAIRWISE TABLE
+  # ============================================================================
+  
+  output$combined_pairwise <- DT::renderDataTable({
+    filter_type <- input$combined_comparison_filter
+    
+    # Use custom fiber contrasts if selected
+    if (filter_type == "fiber_control") {
+      fiber_res <- combined_fiber_contrasts()
+      validate(
+        need(fiber_res$success, "Unable to create within-fiber contrasts"),
+        need(!is.null(fiber_res$contrast_df), "No contrast data available")
+      )
+      df <- fiber_res$contrast_df
+    } else {
+      # Use regular pairwise comparisons
+      pw_res <- combined_pairwise_data()
+      validate(need(!is.null(pw_res$pairwise_df), "Run model first"))
+      df <- pw_res$pairwise_df
+    }
+    
+    alpha <- input$combined_alpha
+    
+    DT::datatable(
+      df,
+      options = list(
+        pageLength = 20,
+        scrollX = TRUE,
+        scrollY = "500px",
+        dom = "Blfrtip",
+        columnDefs = list(
+          list(className = 'dt-center', targets = "_all")
+        )
+      ),
+      rownames = FALSE,
+      caption = paste0(
+        "Pairwise Comparisons (α = ", alpha, ") - ",
+        "Filter: ", filter_type
+      )
+    ) %>%
+      DT::formatRound(
+        columns = c("estimate", "SE", "t.ratio", "p.value"),
+        digits = 4
+      ) %>%
+      DT::formatStyle(
+        'p.value',
+        backgroundColor = DT::styleInterval(
+          c(0.001, 0.01, 0.05),
+          c('#ffebee', '#fff3e0', '#fffde7', 'white')
+        )
+      ) %>%
+      DT::formatStyle(
+        'significant',
+        fontWeight = 'bold',
+        color = DT::styleEqual(
+          c('***', '**', '*', ''),
+          c('red', 'orange', 'blue', 'black')
+        )
+      )
+  })
+  
+  # ============================================================================
+  # OUTPUT: COMBINED PAIRWISE PLOT
+  # ============================================================================
+  
+  output$combined_pairwise_plot <- renderPlot({
+    pw_res <- combined_pairwise_data()
+    validate(need(!is.null(pw_res$pairwise_df), "Run model first"))
+    
+    df <- pw_res$pairwise_df %>%
+      dplyr::arrange(estimate) %>%
+      dplyr::mutate(
+        contrast = forcats::fct_reorder(contrast, estimate),
+        sig_level = dplyr::case_when(
+          p.value < 0.001 ~ "p < 0.001",
+          p.value < 0.01 ~ "p < 0.01",
+          p.value < 0.05 ~ "p < 0.05",
+          TRUE ~ "Not significant"
+        )
+      )
+    
+    # Limit to top 30 comparisons if too many
+    if (nrow(df) > 30) {
+      df <- df %>%
+        dplyr::slice_head(n = 30)
+    }
+    
+    ggplot2::ggplot(df, ggplot2::aes(x = estimate, y = contrast, color = sig_level)) +
+      ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
+      ggplot2::geom_point(size = 3) +
+      ggplot2::geom_errorbarh(
+        ggplot2::aes(xmin = estimate - SE * 1.96, xmax = estimate + SE * 1.96),
+        height = 0.2
+      ) +
+      ggplot2::scale_color_manual(
+        values = c(
+          "p < 0.001" = "#D32F2F",
+          "p < 0.01" = "#F57C00",
+          "p < 0.05" = "#1976D2",
+          "Not significant" = "#757575"
+        )
+      ) +
+      ggplot2::theme_minimal(base_size = 12) +
+      ggplot2::labs(
+        title = "Pairwise Comparison Estimates",
+        subtitle = paste("Filter:", input$combined_comparison_filter, "| Adjustment: Tukey HSD"),
+        x = "Estimated Difference",
+        y = "Contrast",
+        color = "Significance"
+      ) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(size = 14, face = "bold"),
+        axis.text.y = ggplot2::element_text(size = 9),
+        legend.position = "bottom"
+      )
+  })
+  
+  output$combined_diagnostics <- renderPlot({
+    mdl <- combined_model()
+    validate(need(!is.null(mdl), "Run model first to see diagnostics"))
+    
+    # Create diagnostic plots
+    par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+    
+    # 1. Residuals vs Fitted
+    plot(
+      fitted(mdl),
+      residuals(mdl),
+      xlab = "Fitted Values",
+      ylab = "Residuals",
+      main = "Residuals vs Fitted",
+      pch = 16,
+      col = alpha("steelblue", 0.6)
+    )
+    abline(h = 0, col = "red", lty = 2, lwd = 2)
+    
+    # 2. Normal Q-Q Plot
+    qqnorm(
+      residuals(mdl),
+      main = "Normal Q-Q Plot",
+      pch = 16,
+      col = alpha("steelblue", 0.6)
+    )
+    qqline(residuals(mdl), col = "red", lwd = 2, lty = 2)
+    
+    # 3. Scale-Location (sqrt of standardized residuals vs fitted)
+    sqrt_std_resid <- sqrt(abs(scale(residuals(mdl))))
+    plot(
+      fitted(mdl),
+      sqrt_std_resid,
+      xlab = "Fitted Values",
+      ylab = expression(sqrt("|Standardized Residuals|")),
+      main = "Scale-Location",
+      pch = 16,
+      col = alpha("steelblue", 0.6)
+    )
+    lines(
+      lowess(fitted(mdl), sqrt_std_resid),
+      col = "red",
+      lwd = 2
+    )
+    
+    # 4. Cook's Distance
+    cooks_d <- cooks.distance(mdl)
+    n <- length(cooks_d)
+    plot(
+      1:n,
+      cooks_d,
+      type = "h",
+      xlab = "Observation Index",
+      ylab = "Cook's Distance",
+      main = "Cook's Distance (Influence)",
+      col = ifelse(cooks_d > 4 / n, "red", "steelblue"),
+      lwd = 2
+    )
+    abline(h = 4 / n, col = "red", lty = 2, lwd = 1.5)
+    text(
+      x = n * 0.7,
+      y = max(cooks_d) * 0.9,
+      labels = paste("Threshold:", round(4 / n, 4)),
+      col = "red",
+      cex = 0.8
+    )
+  })
+  
+  # -----------------------------------------------------------------------------
+  # Download handler
+  # -----------------------------------------------------------------------------
+  output$download_combined_results <- downloadHandler(
+    filename = function() paste0("combined_treatment_analysis_", Sys.Date(), ".txt"),
+    content = function(file) {
+      mdl <- combined_model()
+      sink(file)
+      cat("COMBINED TREATMENT ANALYSIS RESULTS\n")
+      cat("Date:", as.character(Sys.Date()), "\n")
+      cat("Dependent variable: outcome\n")
+      cat("Reference level:", input$combined_reference, "\n\n")
+      cat("MODEL SUMMARY\n")
+      print(summary(mdl))
+      cat("\nANOVA\n")
+      print(stats::anova(mdl))
+      sink()
+    }
+  )
+  
+  # ============================================================================
+  # DYNAMIC ENDPOINT SELECTOR FOR COMBINED TREATMENT ANALYSIS
+  # ============================================================================
+  
+  observe({
+    req(input$active_dataset)  # CORRECT: active_dataset with underscore!
+    
+    cat("\n=== Updating combined_endpoint choices ===\n")
+    cat("Active dataset:", input$active_dataset, "\n")
+    
+    choices <- character(0)
+    
+    if (identical(input$active_dataset, "assay")) {
+      # Try to get assay endpoints from final_data
+      choices <- tryCatch({
+        req(final_data)
+        sort(unique(final_data$assay_type))
+      }, error = function(e) {
+        cat("Error accessing final_data:", e$message, "\n")
+        c("ACP", "AChE", "ALP", "Bradford", "CAT", "SOD")
+      })
+      cat("Assay endpoints:", paste(choices, collapse = ", "), "\n")
+      
+    } else if (identical(input$active_dataset, "physical")) {
+      # Try to get physical endpoints from physical_master
+      choices <- tryCatch({
+        req(physical_master)
+        sort(unique(physical_master$endpoint))
+      }, error = function(e) {
+        cat("Error accessing physical_master:", e$message, "\n")
+        c("bci", "clearance_rate", "mf_counts", "respiration_rate")
+      })
+      cat("Physical endpoints:", paste(choices, collapse = ", "), "\n")
+    }
+    
+    # Update the dropdown
+    if (length(choices) > 0) {
+      updateSelectInput(
+        session, 
+        "combined_endpoint", 
+        choices = choices, 
+        selected = choices[1]
+      )
+      cat("✓ Dropdown updated successfully with", length(choices), "choices\n")
+    } else {
+      updateSelectInput(
+        session, 
+        "combined_endpoint", 
+        choices = c("No endpoints available" = "none"), 
+        selected = "none"
+      )
+      cat("⚠ WARNING: No endpoints found!\n")
+    }
+  })
+  
+  # Status indicator
+  output$combined_data_info <- renderText({
+    if (is.null(input$combined_endpoint) || 
+        identical(input$combined_endpoint, "none") ||
+        identical(input$combined_endpoint, "loading")) {
+      return("⚠ No data loaded")
+    }
+    
+    data_count <- tryCatch({
+      req(combined_base_data())
+      nrow(combined_base_data())
+    }, error = function(e) 0)
+    
+    if (data_count > 0) {
+      paste0("✓ ", data_count, " observations loaded")
+    } else {
+      "⚠ No data for selected endpoint"
+    }
   })
   
   # EMMEANS calculation for mixed effects models
