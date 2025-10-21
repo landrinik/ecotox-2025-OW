@@ -1,0 +1,12 @@
+name: app_v8
+title: app_v8
+username: landrinik-ecotox
+account: landrinik-ecotox
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 15791950
+bundleId: 11049901
+url: https://landrinik-ecotox.shinyapps.io/app_v8/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

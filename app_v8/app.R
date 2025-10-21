@@ -14,6 +14,14 @@ source("modeling.R", local = TRUE)    # Statistical modeling functions
 ui <- fluidPage(
   useShinyjs(),
   
+#   # Collapsible card styling
+#   tags$style(HTML("
+#   details.fold { margin-bottom: 10px; border: 1px solid #e9ecef; border-radius: 6px; background:#fff; }
+#   details.fold > summary { cursor: pointer; padding: 8px 12px; font-weight: 600; background:#f7f7f7; border-bottom: 1px solid #e9ecef; list-style: none; }
+#   details.fold[open] > summary { background:#eef6ff; }
+#   details.fold .fold-body { padding: 10px 12px; }
+# ")),
+  
   # Enable Enter key to trigger Run buttons based on active tab
   tags$script(HTML("
     $(document).on('keypress', function(e) {
@@ -53,14 +61,8 @@ ui <- fluidPage(
         br(),
         selectizeInput("assay", "Assay Type:", choices = endpoint_choices_assay, multiple = TRUE),
         selectizeInput("fiber", "Fiber Type:", choices = c("cotton", "pet"), multiple = TRUE),
-        selectizeInput("sample_type", "Sample Type:", 
-                       choices = if(exists("config") && !is.null(config$samples)) {
-                         tolower(config$samples)
-                       } else if(exists("final_data") && nrow(final_data) > 0) {
-                         sort(unique(tolower(final_data$sample_type)))
-                       } else {
-                         c("tissue", "gland", "gills", "hemolymph")
-                       }, 
+        selectizeInput("sample_type", "Sample Type:",
+                       choices = sample_types_assay,  # From global.R: gills, gland, hemolymph
                        multiple = TRUE),
         selectizeInput("week", "Week:", choices = week_choices_assay, multiple = TRUE),
         selectizeInput("treatment", "Treatment:", choices = c("Treated", "Untreated", "Control"), multiple = TRUE),
@@ -162,25 +164,36 @@ ui <- fluidPage(
                             DT::dataTableOutput("pairwise_table"),
                             
                             # ============================================================================
-                            # TIME TRENDS ANALYSIS - In app.R mainPanel
+                            # TIME TRENDS ANALYSIS
                             # ============================================================================
                             hr(),
                             h4("Optional: Time Trends Analysis"),
                             
+                            # Sticky style for bottom controls (optional)
+                            tags$style(HTML("
+  .trend-controls-bottom {
+    position: sticky; top: 8px;
+    background: #fff; padding: 8px 12px; margin-bottom: 8px;
+    border: 1px solid #eee; border-radius: 6px; z-index: 2;
+  }
+")),
+                            
                             wellPanel(
                               style = "background-color: #f9f9f9;",
                               
-                              checkboxInput("show_trends", 
-                                            "Analyze linear trends over time", 
-                                            value = FALSE),
+                              checkboxInput(
+                                "show_trends",
+                                "Analyze linear trends over time",
+                                value = FALSE
+                              ),
                               
                               helpText(
-                                strong("What this does:"), 
+                                strong("What this does:"),
                                 "Tests whether outcomes change linearly across weeks for each fiber × treatment combination.",
                                 br(),
                                 "This analysis estimates the slope of change per week and compares slopes between groups.",
                                 br(), br(),
-                                strong("When to use:"), 
+                                strong("When to use:"),
                                 "Only useful when 'week' is included in your model and you want to know if trends differ between groups.",
                                 style = "color: #555;"
                               ),
@@ -190,40 +203,73 @@ ui <- fluidPage(
                                 
                                 hr(),
                                 
-                                # Filter options for trends
-                                h5("Trend Analysis Options"),
-                                fluidRow(
-                                  column(6,
-                                         selectInput("trend_filter_type", "Filter by:",
-                                                     choices = c("All Groups" = "none",
-                                                                 "Fiber Type" = "fiber",
-                                                                 "Treatment" = "treatment",
-                                                                 "Both" = "both"),
-                                                     selected = "none")
-                                  ),
-                                  column(6,
-                                         conditionalPanel(
-                                           condition = "input.trend_filter_type == 'fiber' || input.trend_filter_type == 'both'",
-                                           selectInput("trend_fiber_select", "Select Fiber:",
-                                                       choices = c("cotton", "pet"),
-                                                       selected = "cotton")
-                                         ),
-                                         conditionalPanel(
-                                           condition = "input.trend_filter_type == 'treatment' || input.trend_filter_type == 'both'",
-                                           selectInput("trend_treatment_select", "Select Treatment:",
-                                                       choices = c("treated", "untreated"),
-                                                       selected = "untreated")
-                                         )
-                                  )
-                                ),
-                                
-                                hr(),
-                                
+                                # 1) Linear trends output appears first
                                 h5("Linear Trends Output"),
-                                verbatimTextOutput("regression_trends"),
+                                verbatimTextOutput("regression_trends", placeholder = TRUE),
                                 
                                 br(),
                                 
+                                # 2) MOVED HERE: controls below the summaries for easy access while viewing plot
+                                div(
+                                  class = "trend-controls-bottom",
+                                  hr(),
+                                  h5("Adjust Trend Filters"),
+                                  fluidRow(
+                                    column(
+                                      6,
+                                      selectInput(
+                                        "trend_filter_type", "Filter by:",
+                                        choices = c(
+                                          "All Groups" = "none",
+                                          "Fiber Type" = "fiber",
+                                          "Treatment"  = "treatment",
+                                          "Both"       = "both"
+                                        ),
+                                        selected = "none"
+                                      )
+                                    ),
+                                    column(
+                                      6,
+                                      selectInput(
+                                        "trend_concentration", "Concentration for trends:",
+                                        choices = c(
+                                          "All doses (average)" = "all",
+                                          "Controls (0 mf/L)"   = "0",
+                                          "100 mf/L"            = "100",
+                                          "1000 mf/L"           = "1000",
+                                          "10000 mf/L"          = "10000"
+                                        ),
+                                        selected = "all"
+                                      )
+                                    )
+                                  ),
+                                  fluidRow(
+                                    column(
+                                      6,
+                                      conditionalPanel(
+                                        condition = "input.trend_filter_type == 'fiber' || input.trend_filter_type == 'both'",
+                                        selectInput(
+                                          "trend_fiber_select", "Select Fiber:",
+                                          choices = c("cotton", "pet"),
+                                          selected = "cotton"
+                                        )
+                                      )
+                                    ),
+                                    column(
+                                      6,
+                                      conditionalPanel(
+                                        condition = "input.trend_filter_type == 'treatment' || input.trend_filter_type == 'both'",
+                                        selectInput(
+                                          "trend_treatment_select", "Select Treatment:",
+                                          choices = c("treated", "untreated"),
+                                          selected = "untreated"
+                                        )
+                                      )
+                                    )
+                                  )
+                                ),
+                                
+                                # 3) Plot comes after the moved controls
                                 h5("Trends Visualization"),
                                 plotOutput("regression_trend_plot", height = "500px")
                               )
@@ -234,7 +280,7 @@ ui <- fluidPage(
               ),
         
         # ---------------------------------------------------------------------------
-        # Combined Treatment Analysis tab (UI)
+        # Combined Treatment Analysis tab
         # ---------------------------------------------------------------------------
         tabPanel(
           "Combined Treatment Analysis",
@@ -338,15 +384,56 @@ ui <- fluidPage(
               
               tabPanel(
                 "Model Summary",
+                
+                # Collapsible card styling (scoped to this tab)
+                tags$style(HTML("
+    details.fold { margin-bottom: 10px; border: 1px solid #e9ecef; border-radius: 6px; background:#fff; }
+    details.fold > summary { cursor: pointer; padding: 8px 12px; font-weight: 600; background:#f7f7f7; border-bottom: 1px solid #e9ecef; list-style: none; }
+    details.fold[open] > summary { background:#eef6ff; }
+    details.fold .fold-body { padding: 10px 12px; }
+  ")),
+                
                 br(),
-                h5("Combined Treatment Variable Levels"),
-                verbatimTextOutput("combined_treatment_levels"),
-                br(),
-                h5("Model Coefficients"),
-                verbatimTextOutput("combined_model_summary"),
-                br(),
-                h5("ANOVA Table"),
-                verbatimTextOutput("combined_anova")
+                
+                # --- Combined Treatment Variable Levels (collapsed by default) ---
+                tags$details(
+                  class = "fold",
+                  open = NA,  # set to TRUE to start expanded
+                  
+                  tags$summary("Combined Treatment Variable Levels"),
+                  
+                  div(
+                    class = "fold-body",
+                    # unchanged output id from server
+                    verbatimTextOutput("combined_treatment_levels")
+                  )
+                ),
+                
+                # --- Model Coefficients (collapsed by default) ---
+                tags$details(
+                  class = "fold",
+                  open = NA,
+                  
+                  tags$summary("Model Coefficients"),
+                  
+                  div(
+                    class = "fold-body",
+                    verbatimTextOutput("combined_model_summary")
+                  )
+                ),
+                
+                # --- ANOVA Table (collapsed by default) ---
+                tags$details(
+                  class = "fold",
+                  open = NA,
+                  
+                  tags$summary("ANOVA Table"),
+                  
+                  div(
+                    class = "fold-body",
+                    verbatimTextOutput("combined_anova")
+                  )
+                )
               ),
               
               tabPanel(
@@ -476,7 +563,7 @@ ui <- fluidPage(
                 ),
                 
                 # Fixed weeks
-                shinyjs::disabled(selectInput("recovery_baseline_week", "Baseline Week:", choices = 5, selected = 5)),
+                selectInput("recovery_baseline_week", "Baseline Week:", choices = c(1, 3, 5), selected = 5),
                 shinyjs::disabled(selectInput("recovery_recovery_week", "Recovery Week:", choices = 6, selected = 6)),
                 
                 h5("Recovery-Specific Filters:"),
@@ -537,13 +624,32 @@ ui <- fluidPage(
                   column(6, checkboxInput("recovery_include_emmeans", "Include EM Means Analysis", value = TRUE))
                 ),
                 
-                helpText("Recovery compares Week 6 vs Week 5 using filters independent of the main sidebar.")
+                helpText("Recovery compares Week 6 vs the selected baseline week (1 or 5) using filters independent of the main sidebar.")
               ),
               
               # Translocation stub
               wellPanel(
                 h4("Translocation Analysis"),
-                selectInput("translocation_endpoint", "Endpoint:", choices = NULL),
+                # Week selector (single)
+                selectizeInput(
+                  "transloc_week", "Week:",
+                  choices = sort(unique(physical_master$week)),     # assumes weeks present in physical
+                  selected = max(sort(unique(physical_master$week))), 
+                  multiple = FALSE
+                ),
+                # Two-tissue selector (exactly 2)
+                selectizeInput(
+                  "transloc_tissues", "Tissues to compare:",
+                  choices = tissue_types_physical,                   # c("gills","gland","tissue") from global.R
+                  multiple = TRUE, options = list(maxItems = 2)
+                ),
+                # Fiber concentration (multi)
+                selectizeInput(
+                  "transloc_conc", "Fiber concentration (mF/L):",
+                  choices = c("0","100","1000","10000"),
+                  selected = c("0","100","1000","10000"),
+                  multiple = TRUE
+                ),
                 actionButton("run_translocation", "Run Translocation Analysis")
               )
             ),
@@ -565,8 +671,28 @@ ui <- fluidPage(
                   "Recovery EM Means",
                   conditionalPanel(
                     condition = "input.recovery_include_emmeans",
+                    
                     h4("Estimated Marginal Means"),
                     DT::dataTableOutput("recovery_emmeans_table"),
+                    br(),
+                    fluidRow(
+                      column(
+                        width = 4,
+                        selectInput(
+                          inputId = "recovery_p_adjust",
+                          label   = "P-value adjust:",
+                          choices  = c("BH (FDR)" = "BH",
+                                       "Holm"     = "holm",
+                                       "Bonferroni" = "bonferroni",
+                                       "None"     = "none"),
+                          selected = "BH"
+                        )
+                      )
+                    ),
+                    
+                    h4("p-values"),
+                    DT::dataTableOutput("recovery_significance_table"),
+                    
                     br(),
                     h4("EM Means Plot"),
                     plotOutput("recovery_emmeans_plot", height = "500px")
@@ -576,10 +702,10 @@ ui <- fluidPage(
                     div(class = "alert alert-info", "Enable 'Include EM Means Analysis' to view emmeans results.")
                   )
                 ),
-                tabPanel("Translocation Summary", DT::dataTableOutput("translocation_summary")),
+                tabPanel("Translocation Summary", DT::dataTableOutput("transloc_summary_table")),
                 tabPanel("Translocation Plots",
-                         plotOutput("translocation_plot", height = "400px"),
-                         br(), plotOutput("tissue_comparison_plot", height = "400px"))
+                         plotOutput("transloc_counts_plot", height = 420),
+                         plotOutput("transloc_diff_plot",   height = 360))
               )
             )
           )
@@ -766,36 +892,44 @@ server <- function(input, output, session) {
   
   # Dynamic tissue filter UI for mf_counts endpoint
   output$tissue_type_ui <- renderUI({
-    req(input$endpoint)
-    if ("mf_counts" %in% input$endpoint) {
-      selectizeInput("tissue_type_phys", "Tissue Type", 
-                    choices = unique(na.omit(physical_master$tissue_type)), multiple = TRUE)
+    # Only render in the Physical Endpoint Data mode
+    req(input$active_dataset == "physical")  # FIX: correct id
+    
+    # Only show when mf_counts is among the selected endpoints
+    if (!is.null(input$endpoint) && "mf_counts" %in% input$endpoint) {
+      selectizeInput(
+        inputId = "tissue_type_phys",
+        label   = "Tissue Type",
+        choices = tissue_types_physical,   # from global.R
+        multiple = TRUE,
+        selected = NULL
+      )
+    } else {
+      NULL  # Hide the input for non-mf_counts endpoints
     }
   })
   
-  # ADD THIS NEW BLOCK HERE - STEP 2: Dynamic sample type choices
+  # ============================================================================
+  # Dynamic sample type choices for assay data
+  # ============================================================================
   observe({
+    # Only run for assay data
+    req(input$active_dataset == "assay")
+    
     # Get available sample types from actual data
     if (exists("final_data") && nrow(final_data) > 0) {
       actual_samples <- sort(unique(tolower(final_data$sample_type)))
       
-      # Get config samples (convert to lowercase for consistency)  
-      config_samples <- if(exists("config") && !is.null(config$samples)) {
-        tolower(config$samples)
-      } else {
-        c("tissue", "gland", "gills", "hemolymph")
+      # Filter to allowed sample types only
+      available_samples <- intersect(sample_types_assay, actual_samples)
+      if (length(available_samples) == 0) {
+        available_samples <- sample_types_assay  # Fallback to all allowed types
       }
       
-      # Use intersection of config and actual data, or just actual data
-      available_samples <- if(any(config_samples %in% actual_samples)) {
-        intersect(config_samples, actual_samples)
-      } else {
-        actual_samples
-      }
-      
-      # Update the choices
+      # Update the choices dynamically
       updateSelectizeInput(session, "sample_type", 
-                           choices = available_samples)
+                           choices = available_samples,
+                           selected = NULL)  # Select all by default
     }
   })
   
@@ -878,11 +1012,27 @@ server <- function(input, output, session) {
   phys_filtered_cached <- reactive({
     df <- physical_master  # Pre-processed data
     
-    if (length(input$fiber_type_phys)) df <- df %>% filter(fiber_type %in% input$fiber_type_phys)
-    if (length(input$week_phys)) df <- df %>% filter(week %in% input$week_phys)
-    if (length(input$endpoint)) df <- df %>% filter(endpoint %in% input$endpoint)
-    if ("mf_counts" %in% input$endpoint && length(input$tissue_type_phys)) {
-      df <- df %>% filter(tissue_type %in% input$tissue_type_phys)
+    if (length(input$fiber_type_phys)) {
+      df <- df %>% filter(fiber_type %in% input$fiber_type_phys)
+    }
+    if (length(input$week_phys)) {
+      df <- df %>% filter(week %in% input$week_phys)
+    }
+    if (length(input$endpoint)) {
+      df <- df %>% filter(endpoint %in% input$endpoint)
+    }
+    
+    # Apply tissue_type filter for mf_counts only
+    if (length(input$tissue_type_phys) > 0) {
+      if ("mf_counts" %in% df$endpoint) {
+        # For mf_counts: filter by tissue_type
+        # For other endpoints: keep all (tissue_type is NA for them)
+        df <- df %>%
+          filter(
+            (endpoint == "mf_counts" & tissue_type %in% input$tissue_type_phys) |
+              (endpoint != "mf_counts")
+          )
+      }
     }
     if (length(input$fiber_concentration_phys)) df <- df %>% filter(fiber_concentration %in% input$fiber_concentration_phys)
     if (length(input$treatment_phys)) df <- df %>% filter(treatment %in% input$treatment_phys)
@@ -916,31 +1066,52 @@ server <- function(input, output, session) {
     df <- phys_filtered()
     req(nrow(df) > 0)
     
-    # Apply blank correction for mf_counts
+    # Control correction is already applied in convert_data_debugged.R
+    # Just select relevant columns and clean up
+    display_cols <- c("fiber_type", "week", "endpoint", "tank", "sample", 
+                      "treatment", "fiber_concentration", "fiber_group", "value")
+    
+    # Add tissue_type for mf_counts
+    if ("tissue_type" %in% names(df) && "mf_counts" %in% df$endpoint) {
+      display_cols <- c(display_cols, "tissue_type")
+    }
+    
+    # Add value_corr for mf_counts (control-corrected values)
+    if ("value_corr" %in% names(df) && "mf_counts" %in% df$endpoint) {
+      display_cols <- c(display_cols, "value_corr")
+    }
+    
+    # Select only relevant columns
     df <- df %>%
-      group_by(fiber_type, week, tissue_type, endpoint) %>%
+      dplyr::select(dplyr::any_of(display_cols)) %>%
       mutate(
-        avg_control = if_else(endpoint == "mf_counts", mean(value[treatment == "Control"], na.rm = TRUE), 0),
-        value_corr = if_else(endpoint == "mf_counts" & treatment != "Control", value - avg_control, value),
-        value_corr = if_else(endpoint == "mf_counts", round(value_corr), value_corr),
-        value = if_else(endpoint == "mf_counts", round(value), value)
-      ) %>% ungroup()
+        value = if_else(endpoint == "mf_counts", round(value, 1), value)
+      )
     
     if (input$mode_phys == "baseline") {
+      # Baseline mode: use raw values
       df
     } else {
-      df %>%
-        mutate(use_val = if_else(endpoint == "mf_counts", value_corr, value)) %>%
+      # Summary modes: use corrected values for mf_counts
+      df <- df %>%
+        mutate(
+          use_val = if_else(endpoint == "mf_counts" & "value_corr" %in% names(.), value_corr, value)
+        ) %>%
         group_by(fiber_group, week, endpoint, tissue_type, fiber_concentration) %>%
         summarise(
-          mean_value = mean(use_val, na.rm = TRUE), sd_value = sd(use_val, na.rm = TRUE),
-          n = n(), cv = ifelse(mean_value != 0, 100 * sd_value / mean_value, NA_real_),
+          mean_value = mean(use_val, na.rm = TRUE),
+          sd_value = sd(use_val, na.rm = TRUE),
+          n = n(),
+          cv = if_else(mean_value != 0, 100 * sd_value / mean_value, NA_real_),
           .groups = "drop"
         ) %>%
         mutate(
           mean_value = if_else(abs(mean_value) < 1, round(mean_value, 4), round(mean_value, 2)),
-          sd_value = signif(sd_value, 5), cv = round(cv, 2)
+          sd_value = signif(sd_value, 5),
+          cv = round(cv, 2)
         )
+      
+      df
     }
   })
   
@@ -1118,6 +1289,22 @@ server <- function(input, output, session) {
     wks <- input$weeks_include %||% c("1","3","5")
     df <- df %>% filter(as.character(week) %in% wks)
     
+    # Only build is_recovery when BOTH week 6 and a baseline week are present
+    has_week6      <- "6" %in% wks
+    has_baseline   <- any(c("1","3","5") %in% wks)
+    if (has_week6 && has_baseline) {
+      df <- df %>%
+        dplyr::mutate(
+          is_recovery = factor(
+            ifelse(as.character(week) == "6", "Week6", "Baseline"),
+            levels = c("Baseline","Week6")
+          )
+        )
+    } else {
+      # Ensure the column doesn’t exist when not meaningful
+      if ("is_recovery" %in% names(df)) df$is_recovery <- NULL
+    }
+    
     df %>% normalize_controls_and_dose() %>% droplevels()
   }) %>% bindCache(input$regression_dataset, input$regression_endpoint, input$weeks_include)
   
@@ -1179,25 +1366,43 @@ server <- function(input, output, session) {
   # Regression model fitting
   regression_model <- eventReactive(input$run_regression, {
     tryCatch({
+      # regression_data() already applies weeks_include and (after your last changes)
+      # may add is_recovery only when Week6 and a baseline are both present
       df <- regression_data()
       req(nrow(df) > 0)
       
-      # Build formula
-      form <- outcome ~ fiber_type * chem_treatment + week + 
-        fiber_type:week + chem_treatment:week + is_control * fiber_type + dose_log10
+      # Does this run have 2+ distinct weeks?
+      has_week <- dplyr::n_distinct(df$week) >= 2
       
-      if (isTRUE(input$include_three_way)) form <- update(form, . ~ . + fiber_type:chem_treatment:week)
+      # Base formula without week terms
+      form <- outcome ~ fiber_type * chem_treatment +
+        is_control * fiber_type +
+        dose_log10
+      
+      # Add week main effect and interactions only when estimable
+      if (has_week) {
+        form <- update(form, . ~ . + week + fiber_type:week + chem_treatment:week)
+        if (isTRUE(input$include_three_way)) {
+          form <- update(form, . ~ . + fiber_type:chem_treatment:week)
+        }
+      }
+      
+      # Optional dose interactions
       if (isTRUE(input$dose_by_fiber)) form <- update(form, . ~ . + dose_log10:fiber_type)
       if (isTRUE(input$dose_by_treat)) form <- update(form, . ~ . + dose_log10:chem_treatment)
       
-      wks_selected <- input$weeks_include %||% c("1","3","5")
-      if (isTRUE(input$include_recovery_interaction) && "6" %in% wks_selected) {
-        form <- update(form, . ~ . + is_recovery + is_recovery:chem_treatment + is_recovery:dose_log10)
+      # Recovery terms only if present and has two levels
+      has_recovery <- ("is_recovery" %in% names(df)) &&
+        dplyr::n_distinct(stats::na.omit(df$is_recovery)) >= 2
+      if (isTRUE(input$include_recovery_interaction) && has_recovery) {
+        form <- update(form, . ~ . + is_recovery +
+                         is_recovery:chem_treatment +
+                         is_recovery:dose_log10)
       }
       
-      lm(form, data = df)
-    }, error = function(e) { 
-      list(error = e$message) 
+      stats::lm(form, data = df)
+    }, error = function(e) {
+      list(error = e$message)
     })
   })
   
@@ -1207,33 +1412,21 @@ server <- function(input, output, session) {
       df <- lmer_data()
       req(nrow(df) > 0)
       
-      message("Building lmer model with ", nrow(df), " observations")
+      has_week <- dplyr::n_distinct(df$week) >= 2
       
-      # ENHANCED: More stable model building approach
-      
-      # Start with basic formula
-      fixed_formula <- "outcome ~ fiber_type + chem_treatment + week + dose_log10 + is_control"
-      
-      # Add interactions carefully to avoid over-parameterization
-      if (input$lmer_include_three_way && length(unique(df$week)) > 2) {
-        fixed_formula <- paste(fixed_formula, "+ fiber_type:chem_treatment + fiber_type:week + chem_treatment:week")
-        
-        # Only add 3-way if we have enough data
-        if (nrow(df) > 100) {
-          fixed_formula <- paste(fixed_formula, "+ fiber_type:chem_treatment:week")
+      fixed_terms <- c("outcome ~ fiber_type + chem_treatment", "dose_log10", "is_control")
+      if (has_week) {
+        fixed_terms <- c(fixed_terms, "week", "fiber_type:chem_treatment", "fiber_type:week", "chem_treatment:week")
+        if (input$lmer_include_three_way && nrow(df) > 100) {
+          fixed_terms <- c(fixed_terms, "fiber_type:chem_treatment:week")
         }
       } else {
-        # Add basic 2-way interactions
-        fixed_formula <- paste(fixed_formula, "+ fiber_type:chem_treatment")
+        fixed_terms <- c(fixed_terms, "fiber_type:chem_treatment")
       }
+      if (input$lmer_dose_by_fiber) fixed_terms <- c(fixed_terms, "dose_log10:fiber_type")
+      if (input$lmer_dose_by_treat) fixed_terms <- c(fixed_terms, "dose_log10:chem_treatment")
       
-      if (input$lmer_dose_by_fiber) {
-        fixed_formula <- paste(fixed_formula, "+ dose_log10:fiber_type")
-      }
-      
-      if (input$lmer_dose_by_treat) {
-        fixed_formula <- paste(fixed_formula, "+ dose_log10:chem_treatment")
-      }
+      fixed_formula  <- paste(fixed_terms, collapse = " + ")
       
       # SMART: Build random effects based on data availability
       random_terms <- input$lmer_random_terms
@@ -1277,27 +1470,14 @@ server <- function(input, output, session) {
         full_formula <- fixed_formula
       }
       
-      formula_obj <- as.formula(full_formula)
-      message("Final formula: ", deparse(formula_obj))
+      full_formula   <- as.formula(paste(fixed_formula, random_formula))
       
-      # Fit model with enhanced control parameters for stability
-      model <- lmer(formula_obj, data = df, 
-                    control = lmerControl(
-                      optimizer = "bobyqa",      # More stable optimizer
-                      optCtrl = list(maxfun = 20000),  # More iterations
-                      check.conv.singular = "warning",  # Don't fail on singular fits
-                      calc.derivs = FALSE        # Skip expensive derivative calculations
-                    ))
-      
-      # Check for convergence warnings
-      if (length(model@optinfo$conv$lme4$messages) > 0) {
-        message("Model convergence warnings: ", paste(model@optinfo$conv$lme4$messages, collapse = "; "))
-      }
-      
-      model
-      
+      lme4::lmer(full_formula, data = df,
+                 control = lme4::lmerControl(optimizer = "bobyqa",
+                                             optCtrl = list(maxfun = 20000),
+                                             check.conv.singular = "warning",
+                                             calc.derivs = FALSE))
     }, error = function(e) {
-      message("LMER model fitting error: ", e$message)
       list(error = e$message)
     })
   })
@@ -1310,37 +1490,32 @@ server <- function(input, output, session) {
   # EMMEANS calculation for regular regression 
   emmeans_results <- eventReactive(input$run_emmeans, {
     tryCatch({
-      # Require that the regression model exists first
-      model <- regression_model()
-      validate(need(!is.null(model) && !inherits(model, "list"), "Run the regression model first"))
+      mdl <- regression_model()
+      validate(need(!is.null(mdl) && !inherits(mdl, "list"), "Run the regression model first"))
       
-      # Calculate dose value based on selection
+      # Dose settings for 'at'
       dose_val <- switch(input$emmeans_dose,
-                         "0" = 0,           # Control level (log10 scale)
-                         "2" = log10(100),  # Low dose
-                         "3" = log10(1000), # Medium dose  
-                         "4" = log10(10000)) # High dose
-      
+                         "0" = 0, "2" = log10(100), "3" = log10(1000), "4" = log10(10000))
       is_ctrl <- ifelse(dose_val == 0, 1, 0)
       at_list <- list(dose_log10 = dose_val, is_control = is_ctrl)
       
-      # Get the grouping specification
+      # Is 'week' in the fitted model?
+      model_terms <- attr(terms(mdl), "term.labels")
+      has_week <- any(grepl("\\bweek\\b", model_terms))
+      
+      # Map UI to a valid emmeans spec, avoiding 'week' if absent
       emmeans_spec <- switch(input$emmeans_by,
-                             "treatment" = ~ chem_treatment | fiber_type,
-                             "fiber_type" = ~ fiber_type,
-                             "week" = ~ week,
-                             "treatment_week" = ~ chem_treatment | week + fiber_type,
-                             "treatment_fiber" = ~ chem_treatment | fiber_type,
-                             "fiber_week" = ~ fiber_type | week,
-                             "all_interactions" = ~ chem_treatment | fiber_type + week)
-      
-      # Get the emmeans
-      emm <- emmeans(model, specs = emmeans_spec, at = at_list)
-      
-      list(
-        emmeans = emm,
-        emmeans_df = as.data.frame(emm)
+                             "treatment"        = ~ chem_treatment | fiber_type,
+                             "fiber_type"       = ~ fiber_type,
+                             "week"             = if (has_week) ~ week else ~ chem_treatment | fiber_type,
+                             "treatment_week"   = if (has_week) ~ chem_treatment | week + fiber_type else ~ chem_treatment | fiber_type,
+                             "treatment_fiber"  = ~ chem_treatment | fiber_type,
+                             "fiber_week"       = if (has_week) ~ fiber_type | week else ~ fiber_type,
+                             "all_interactions" = if (has_week) ~ chem_treatment | fiber_type + week else ~ chem_treatment | fiber_type
       )
+      
+      emm <- emmeans::emmeans(mdl, specs = emmeans_spec, at = at_list)
+      list(emmeans = emm, emmeans_df = as.data.frame(emm))
     }, error = function(e) {
       message("Emmeans error: ", e$message)
       list(error = e$message)
@@ -1496,6 +1671,22 @@ server <- function(input, output, session) {
     }
   })
   
+  # Helper: map trend_concentration to at-list for emmeans/emtrends
+  trend_at_list <- reactive({
+    conc <- input$trend_concentration
+    if (is.null(conc) || conc == "all") return(NULL)
+    
+    if (conc == "0") {
+      # control: dose_log10 = 0, is_control = 1
+      list(dose_log10 = 0, is_control = 1)
+    } else {
+      # non-control dose: log10(conc), is_control = 0
+      conc_num <- suppressWarnings(as.numeric(conc))
+      if (isTRUE(is.na(conc_num)) || conc_num <= 0) return(NULL)
+      list(dose_log10 = log10(conc_num), is_control = 0)
+    }
+  })
+  
   # ===========================
   # LINEAR TRENDS TEXT OUTPUT
   # ===========================
@@ -1551,28 +1742,39 @@ server <- function(input, output, session) {
             " fiber, ", toupper(input$trend_treatment_select), " treatment\n\n")
       }
       
+      # Report concentration choice
+      if (!is.null(input$trend_concentration) && input$trend_concentration != "all") {
+        cat("Evaluated at concentration:", input$trend_concentration, "mf/L\n\n")
+      } else {
+        cat("Evaluated across all doses (averaged)\n\n")
+      }
+      
       # Fit a NEW model from scratch with numeric week
       cat("Refitting model with numeric week...\n")
       mdl_numeric <- lm(original_formula, data = trend_data)
       cat("Model refit successful.\n\n")
       
-      # Compute linear trends with the numeric week model
+      # Build 'at' list for emtrends (NULL means average over doses)
+      at_list <- trend_at_list()
+      
+      # emtrends calls with optional 'at'
       if (input$trend_filter_type == "none") {
-        trends <- emmeans::emtrends(mdl_numeric, ~ fiber_type + chem_treatment, 
-                                    var = "week")
+        trends <- emmeans::emtrends(mdl_numeric, ~ fiber_type + chem_treatment,
+                                    var = "week", at = at_list)
       } else if (input$trend_filter_type == "fiber") {
-        trends <- emmeans::emtrends(mdl_numeric, ~ chem_treatment, 
+        trends <- emmeans::emtrends(mdl_numeric, ~ chem_treatment,
                                     var = "week",
-                                    at = list(fiber_type = input$trend_fiber_select))
+                                    at = c(list(fiber_type = input$trend_fiber_select), at_list))
       } else if (input$trend_filter_type == "treatment") {
-        trends <- emmeans::emtrends(mdl_numeric, ~ fiber_type, 
+        trends <- emmeans::emtrends(mdl_numeric, ~ fiber_type,
                                     var = "week",
-                                    at = list(chem_treatment = input$trend_treatment_select))
+                                    at = c(list(chem_treatment = input$trend_treatment_select), at_list))
       } else {
-        trends <- emmeans::emtrends(mdl_numeric, ~ 1, 
+        trends <- emmeans::emtrends(mdl_numeric, ~ 1,
                                     var = "week",
-                                    at = list(fiber_type = input$trend_fiber_select,
-                                              chem_treatment = input$trend_treatment_select))
+                                    at = c(list(fiber_type = input$trend_fiber_select,
+                                                chem_treatment = input$trend_treatment_select),
+                                           at_list))
       }
       
       cat("--- Estimated Linear Trends (Slopes) ---\n")
@@ -1594,7 +1796,7 @@ server <- function(input, output, session) {
       cat("- lower.CL & upper.CL: 95% confidence interval\n")
       cat("\nPositive trend = outcome increases over time\n")
       cat("Negative trend = outcome decreases over time\n")
-      cat("\nNote: Trends are averaged across all dose levels and concentrations.\n")
+      cat("\nNote: Trends reflect the selected concentration when a dose is chosen; otherwise they are averaged across all dose levels.\n")
       
     }, error = function(e) {
       cat("Error computing trends:\n")
@@ -1627,145 +1829,127 @@ server <- function(input, output, session) {
         return(invisible())
       }
       
-      # Get estimated marginal means for plotting
-      # (Uses original model - plotting doesn't need numeric week)
+      # Build at list from UI
+      at_list <- trend_at_list()
+      
+      # Get EMMeans over week, conditioning on filter(s) + optional dose
       if (input$trend_filter_type == "none") {
-        emm_week <- emmeans::emmeans(mdl, ~ week | fiber_type + chem_treatment)
+        emm_week <- emmeans::emmeans(mdl, ~ week | fiber_type + chem_treatment,
+                                     at = at_list)
       } else if (input$trend_filter_type == "fiber") {
-        emm_week <- emmeans::emmeans(mdl, ~ week | chem_treatment,
-                                     at = list(fiber_type = input$trend_fiber_select))
+        emm_week <- emmeans::emmeans(
+          mdl, ~ week | chem_treatment,
+          at = c(list(fiber_type = input$trend_fiber_select), at_list)
+        )
       } else if (input$trend_filter_type == "treatment") {
-        emm_week <- emmeans::emmeans(mdl, ~ week | fiber_type,
-                                     at = list(chem_treatment = input$trend_treatment_select))
+        emm_week <- emmeans::emmeans(
+          mdl, ~ week | fiber_type,
+          at = c(list(chem_treatment = input$trend_treatment_select), at_list)
+        )
       } else {
-        emm_week <- emmeans::emmeans(mdl, ~ week,
-                                     at = list(fiber_type = input$trend_fiber_select,
-                                               chem_treatment = input$trend_treatment_select))
+        emm_week <- emmeans::emmeans(
+          mdl, ~ week,
+          at = c(list(fiber_type = input$trend_fiber_select,
+                      chem_treatment = input$trend_treatment_select),
+                 at_list)
+        )
       }
       
       emm_df <- as.data.frame(emm_week)
+      emm_df$week_num <- if (is.factor(emm_df$week)) as.numeric(as.character(emm_df$week)) else emm_df$week
       
-      # Convert week to numeric for plotting
-      if (is.factor(emm_df$week)) {
-        emm_df$week_num <- as.numeric(as.character(emm_df$week))
+      dose_subtitle <- if (!is.null(input$trend_concentration) && input$trend_concentration != "all") {
+        paste0("Evaluated at ", input$trend_concentration, " mf/L")
       } else {
-        emm_df$week_num <- emm_df$week
+        "Averaged across doses"
       }
       
       # Create plot based on filter selection
       library(ggplot2)
       
       if (input$trend_filter_type == "none") {
-        # Full plot with facets
-        p <- ggplot(emm_df, aes(x = week_num, y = emmean, 
-                                color = chem_treatment, 
+        p <- ggplot(emm_df, aes(x = week_num, y = emmean,
+                                color = chem_treatment,
                                 linetype = chem_treatment,
                                 shape = chem_treatment)) +
           geom_line(size = 1.2) +
           geom_point(size = 3.5) +
-          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
                         width = 0.2, size = 0.8, alpha = 0.7) +
           facet_wrap(~ fiber_type, nrow = 1, scales = "free_y") +
           theme_bw(base_size = 14) +
-          theme(
-            legend.position = "bottom",
-            legend.title = element_text(face = "bold", size = 12),
-            legend.text = element_text(size = 11),
-            strip.background = element_rect(fill = "#5bc0de"),
-            strip.text = element_text(face = "bold", size = 13, color = "white"),
-            panel.grid.minor = element_blank()
-          ) +
+          theme(legend.position = "bottom",
+                legend.title = element_text(face = "bold", size = 12),
+                legend.text  = element_text(size = 11),
+                strip.background = element_rect(fill = "#5bc0de"),
+                strip.text = element_text(face = "bold", size = 13, color = "white"),
+                panel.grid.minor = element_blank()) +
           labs(
             title = "Estimated Marginal Means: Trends Over Time",
-            subtitle = "Linear trends show rate of change per week. Error bars = 95% CI",
-            x = "Week", 
-            y = "Estimated Mean Outcome",
-            color = "Treatment", 
-            linetype = "Treatment",
-            shape = "Treatment"
+            subtitle = paste("Linear trends; error bars = 95% CI •", dose_subtitle),
+            x = "Week", y = "Estimated Mean Outcome",
+            color = "Treatment", linetype = "Treatment", shape = "Treatment"
           )
-        
       } else if (input$trend_filter_type == "fiber") {
-        # Filter by fiber only
-        p <- ggplot(emm_df, aes(x = week_num, y = emmean, 
-                                color = chem_treatment, 
+        p <- ggplot(emm_df, aes(x = week_num, y = emmean,
+                                color = chem_treatment,
                                 linetype = chem_treatment,
                                 shape = chem_treatment)) +
           geom_line(size = 1.3) +
           geom_point(size = 4) +
-          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
                         width = 0.2, size = 0.9, alpha = 0.7) +
           theme_bw(base_size = 15) +
-          theme(
-            legend.position = "bottom",
-            legend.title = element_text(face = "bold", size = 13),
-            legend.text = element_text(size = 12),
-            panel.grid.minor = element_blank()
-          ) +
+          theme(legend.position = "bottom",
+                legend.title = element_text(face = "bold", size = 13),
+                legend.text  = element_text(size = 12),
+                panel.grid.minor = element_blank()) +
           labs(
             title = paste0("Trends Over Time: ", toupper(input$trend_fiber_select), " Fiber"),
-            subtitle = "Linear trends show rate of change per week. Error bars = 95% CI",
-            x = "Week", 
-            y = "Estimated Mean Outcome",
-            color = "Treatment", 
-            linetype = "Treatment",
-            shape = "Treatment"
+            subtitle = paste("Linear trends; error bars = 95% CI •", dose_subtitle),
+            x = "Week", y = "Estimated Mean Outcome",
+            color = "Treatment", linetype = "Treatment", shape = "Treatment"
           )
-        
       } else if (input$trend_filter_type == "treatment") {
-        # Filter by treatment only
-        p <- ggplot(emm_df, aes(x = week_num, y = emmean, 
-                                color = fiber_type, 
+        p <- ggplot(emm_df, aes(x = week_num, y = emmean,
+                                color = fiber_type,
                                 linetype = fiber_type,
                                 shape = fiber_type)) +
           geom_line(size = 1.3) +
           geom_point(size = 4) +
-          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
                         width = 0.2, size = 0.9, alpha = 0.7) +
           theme_bw(base_size = 15) +
-          theme(
-            legend.position = "bottom",
-            legend.title = element_text(face = "bold", size = 13),
-            legend.text = element_text(size = 12),
-            panel.grid.minor = element_blank()
-          ) +
+          theme(legend.position = "bottom",
+                legend.title = element_text(face = "bold", size = 13),
+                legend.text  = element_text(size = 12),
+                panel.grid.minor = element_blank()) +
           labs(
             title = paste0("Trends Over Time: ", toupper(input$trend_treatment_select), " Treatment"),
-            subtitle = "Linear trends show rate of change per week. Error bars = 95% CI",
-            x = "Week", 
-            y = "Estimated Mean Outcome",
-            color = "Fiber Type", 
-            linetype = "Fiber Type",
-            shape = "Fiber Type"
+            subtitle = paste("Linear trends; error bars = 95% CI •", dose_subtitle),
+            x = "Week", y = "Estimated Mean Outcome",
+            color = "Fiber Type", linetype = "Fiber Type", shape = "Fiber Type"
           )
-        
       } else {
-        # Both filters applied - single line
         p <- ggplot(emm_df, aes(x = week_num, y = emmean)) +
           geom_line(size = 1.5, color = "#0073C2") +
           geom_point(size = 5, color = "#0073C2") +
-          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
                         width = 0.2, size = 1, color = "#0073C2", alpha = 0.7) +
           theme_bw(base_size = 16) +
-          theme(
-            panel.grid.minor = element_blank()
-          ) +
+          theme(panel.grid.minor = element_blank()) +
           labs(
-            title = paste0("Trend: ", toupper(input$trend_fiber_select), " + ", 
+            title = paste0("Trend: ", toupper(input$trend_fiber_select), " + ",
                            toupper(input$trend_treatment_select)),
-            subtitle = "Linear trend shows rate of change per week. Error bars = 95% CI",
-            x = "Week", 
-            y = "Estimated Mean Outcome"
+            subtitle = paste("Linear trend; error bars = 95% CI •", dose_subtitle),
+            x = "Week", y = "Estimated Mean Outcome"
           )
       }
       
-      # Add custom x-axis breaks at actual week values
-      p <- p + scale_x_continuous(breaks = unique(emm_df$week_num))
-      print(p)
-      
+      p + scale_x_continuous(breaks = unique(emm_df$week_num))
     }, error = function(e) {
       plot.new()
-      text(0.5, 0.5, paste("Error creating plot:\n", conditionMessage(e)), 
+      text(0.5, 0.5, paste("Error creating plot:\n", conditionMessage(e)),
            cex = 1.1, col = "#d9534f")
     })
   })
@@ -2962,6 +3146,13 @@ server <- function(input, output, session) {
     updateSelectInput(session, "recovery_endpoint", choices = eps, selected = eps[1])
   })
   
+  observe({
+    req(exists("physical_master"), nrow(physical_master) > 0)
+    choices <- sort(unique(physical_master$endpoint))
+    selected <- if ("mf_counts" %in% choices) "mf_counts" else choices[1]
+    updateSelectInput(session, "translocation_endpoint", choices = choices, selected = selected)
+  })
+  
   # Main recovery analysis
   observeEvent(input$run_recovery, {
     message("=== RECOVERY START (scratch) ===")
@@ -3109,13 +3300,30 @@ server <- function(input, output, session) {
       ~ is_recovery
     }
     
-    emm <- tryCatch(emmeans::emmeans(mdl, emm_spec),
-                    error = function(e) { message("[RECOVERY] emmeans failed: ", e$message); NULL })
-    delta <- if (!is.null(emm)) {
-      tryCatch(emmeans::contrast(emm, "revpairwise"), error = function(e) NULL)
-    } else NULL
-    emm_df <- if (!is.null(emm)) tryCatch(as.data.frame(emm), error = function(e) NULL) else NULL
+    # Build emmeans for the chosen specification
+    emm <- tryCatch(
+      emmeans::emmeans(mdl, emm_spec),
+      error = function(e) { message("[RECOVERY] emmeans failed: ", e$message); NULL }
+    )
     
+    # Use the chosen adjustment for Week6 vs Week5 contrasts
+    adj_method <- if (!is.null(input$recovery_p_adjust)) input$recovery_p_adjust else "BH"
+    
+    delta <- if (!is.null(emm)) {
+      tryCatch(emmeans::contrast(emm, "revpairwise", adjust = adj_method),
+               error = function(e) NULL)
+    } else {
+      NULL
+    }
+    
+    # NEW: materialize emmeans as a data frame for the EM Means table
+    emm_df <- if (!is.null(emm)) {
+      tryCatch(as.data.frame(emm), error = function(e) NULL)
+    } else {
+      NULL
+    }
+    
+    # Persist to state
     recovery_state(list(
       model = mdl,
       data = df,
@@ -3123,7 +3331,11 @@ server <- function(input, output, session) {
       dataset = ds,
       baseline_week = wk_base,
       recovery_week = wk_reco,
-      emmeans = list(emmeans = emm, emmeans_df = emm_df, delta = delta),
+      emmeans = list(
+        emmeans    = emm,
+        emmeans_df = emm_df,
+        delta      = delta
+      ),
       formula = form
     ))
     message("=== RECOVERY DONE ===")
@@ -3170,6 +3382,81 @@ server <- function(input, output, session) {
     DT::datatable(res$emmeans$emmeans_df, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
   })
   
+  output$recovery_significance_table <- DT::renderDataTable({
+    # Pull current recovery results
+    res <- recovery_state()
+    validate(need(!is.null(res), ""))                         # ensure run
+    validate(need(is.null(res$error), res$error))             # show model errors if any
+    validate(need(!is.null(res$emmeans$delta),
+                  "No Week6 vs Week5 contrasts available for current filters."))
+    
+    # Coerce emmeans contrast to a data.frame
+    df <- as.data.frame(res$emmeans$delta)
+    
+    # Numeric columns that may exist depending on model family
+    numeric_cols <- intersect(
+      c("estimate", "SE", "df", "t.ratio", "z.ratio", "p.value", "lower.CL", "upper.CL"),
+      names(df)
+    )
+    
+    # Chosen adjustment (default BH) and adjusted p-values
+    adj_method <- if (!is.null(input$recovery_p_adjust)) input$recovery_p_adjust else "BH"
+    
+    df <- df %>%
+      dplyr::mutate(
+        dplyr::across(dplyr::all_of(numeric_cols), ~ suppressWarnings(signif(.x, 5))),
+        p_value_raw = p.value,                                        # keep raw p from emmeans table
+        p_value_adj = suppressWarnings(p.adjust(p_value_raw, method = adj_method)),
+        stars = dplyr::case_when(                                     # star coding on adjusted p
+          is.na(p_value_adj)  ~ "",
+          p_value_adj < 0.001 ~ "***",
+          p_value_adj < 0.01  ~ "**",
+          p_value_adj < 0.05  ~ "*",
+          TRUE                ~ ""
+        ),
+        Significant = dplyr::if_else(!is.na(p_value_adj) & p_value_adj < 0.05,
+                                     paste0("Yes ", stars),
+                                     paste0("No ",  stars))
+      )
+    
+    # Friendlier label if the emmeans 'contrast' column exists
+    if ("contrast" %in% names(df)) {
+      df <- df %>% dplyr::rename(`Week6 vs Week5` = contrast)
+    }
+    
+    # Columns to display (only those that exist)
+    show_cols <- intersect(
+      c("Week6 vs Week5", "is_recovery", "chem_treatment", "fiber_type",
+        "estimate", "SE", "df", "t.ratio", "z.ratio",
+        "p_value_raw", "p_value_adj", "lower.CL", "upper.CL", "Significant"),
+      names(df)
+    )
+    out <- df %>% dplyr::select(dplyr::all_of(show_cols))
+    
+    # Value-specific styling for the Significant column (green for Yes, bold)
+    unique_vals <- unique(out$Significant)
+    color_map   <- ifelse(grepl("^Yes", unique_vals), "#1a7f37", "#444444")
+    weight_map  <- ifelse(grepl("^Yes", unique_vals), "bold",     "normal")
+    
+    DT::datatable(
+      out,
+      rownames = FALSE,
+      filter   = "top",
+      options  = list(pageLength = 12, scrollX = TRUE, dom = "Blfrtip")
+    ) %>%
+      { if ("estimate"     %in% names(out)) DT::formatRound(., "estimate",     4) else . } %>%
+      { if ("SE"           %in% names(out)) DT::formatRound(., "SE",           4) else . } %>%
+      { if ("t.ratio"      %in% names(out)) DT::formatRound(., "t.ratio",      4) else . } %>%
+      { if ("z.ratio"      %in% names(out)) DT::formatRound(., "z.ratio",      4) else . } %>%
+      { if ("p_value_raw"  %in% names(out)) DT::formatRound(., "p_value_raw",  6) else . } %>%
+      { if ("p_value_adj"  %in% names(out)) DT::formatRound(., "p_value_adj",  6) else . } %>%
+      DT::formatStyle(
+        "Significant",
+        color      = DT::styleEqual(unique_vals, color_map),
+        fontWeight = DT::styleEqual(unique_vals, weight_map)
+      )
+  })
+  
   output$recovery_emmeans_plot <- renderPlot({
     res <- recovery_state()
     validate(need(!is.null(res), ""))
@@ -3181,93 +3468,119 @@ server <- function(input, output, session) {
     validate(need(FALSE, "No emmeans object to plot"))
   })
   
-  # ---- Translocation analysis (mf_counts only) ----
-  translocation_analysis <- eventReactive(input$run_translocation, {
-    df <- physical_master %>%
-      create_enhanced_treatment_categories() %>%       # helpers.R
-      dplyr::filter(endpoint == "mf_counts")
+  # ----------------- Translocation: data filter & summary (mf_counts only) -----------------
+  
+  # Reactive to build filtered mf_counts for the selected week / concentrations / tissues
+  transloc_filtered <- eventReactive(input$run_translocation, {
+    req(physical_master, nrow(physical_master) > 0)
+    # Require exactly 2 tissues to compare and a single week
+    validate(need(!is.null(input$transloc_week), "Select a week for translocation."))
+    validate(need(length(input$transloc_tissues) == 2, "Select exactly two tissues to compare."))
+    validate(need(length(input$transloc_conc) >= 1, "Select at least one fiber concentration."))
     
-    # summary by fiber, week, tissue, treatment
-    summary_df <- df %>%
-      dplyr::group_by(fiber_type, week, tissue_type, treatment_category) %>%
+    df <- physical_master %>%
+      dplyr::filter(
+        endpoint == "mf_counts",
+        week == as.integer(input$transloc_week),
+        fiber_concentration %in% input$transloc_conc,
+        tissue_type %in% input$transloc_tissues
+      )
+    
+    validate(need(nrow(df) > 0, "No mf_counts data for the selected week/tissues/concentrations."))
+    
+    # Aggregate to mean per stratum to stabilize the plots
+    df %>%
+      dplyr::group_by(
+        fiber_type, treatment, fiber_concentration, week, tissue_type
+      ) %>%
       dplyr::summarise(
         mean_count = mean(value, na.rm = TRUE),
         sd_count   = sd(value, na.rm = TRUE),
         n          = dplyr::n(),
-        prop_nonzero = mean(value > 0, na.rm = TRUE),
         .groups = "drop"
       )
-    summary_df
   })
   
-  # translocation table
-  output$translocation_summary <- DT::renderDataTable({
-    tbl <- translocation_analysis()
-    validate(need(nrow(tbl) > 0, "Click 'Run Translocation Analysis'"))
-    DT::datatable(tbl, options = list(pageLength = 15, scrollX = TRUE), filter = "top", rownames = FALSE)
-  })
-  
-  # translocation bar plot
-  output$translocation_plot <- renderPlot({
-    tbl <- translocation_analysis()
-    validate(need(nrow(tbl) > 0, "Run Translocation Analysis"))
-    ggplot(tbl, aes(x = factor(week), y = mean_count, fill = tissue_type)) +
-      geom_col(position = position_dodge(width = 0.8), alpha = 0.8) +
-      facet_grid(fiber_type ~ treatment_category) +
-      theme_minimal() +
-      labs(title = "Microfiber Translocation (mf_counts)",
-           x = "Week", y = "Mean Count", fill = "Tissue")
-  })
-  
-  # tissue comparison plot (proportion non-zero)
-  output$tissue_comparison_plot <- renderPlot({
-    tbl <- translocation_analysis()
-    validate(need(nrow(tbl) > 0, "Run Translocation Analysis"))
-    ggplot(tbl, aes(x = tissue_type, y = prop_nonzero, fill = treatment_category)) +
-      geom_col(position = position_dodge(width = 0.8), alpha = 0.85) +
-      facet_wrap(~ week) +
-      theme_minimal() +
-      labs(title = "Proportion of Non-zero Counts by Tissue",
-           x = "Tissue", y = "Proportion > 0", fill = "Treatment") +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  })
-  
-  # ============================================================================
-  #                  TRANSLOCATION OUTPUTS
-  # ============================================================================
-  
-  
-  output$translocation_summary <- DT::renderDataTable({
-    analysis <- translocation_analysis()
-    validate(need(!is.null(analysis), "Click 'Run Translocation Analysis' to generate summary."))
+  # Summarize and compute Tissue A − Tissue B difference
+  transloc_summary <- reactive({
+    df <- transloc_filtered()
     
-    DT::datatable(analysis, options = list(pageLength = 15), filter = "top", rownames = FALSE)
+    t_a <- input$transloc_tissues[[1]]
+    t_b <- input$transloc_tissues[[2]]
+    
+    # Wide for difference
+    wide <- df %>%
+      dplyr::select(fiber_type, treatment, fiber_concentration, week, tissue_type, mean_count) %>%
+      tidyr::pivot_wider(names_from = tissue_type, values_from = mean_count)
+    
+    # Guard if a tissue is missing after filtering (prevents min/max warnings)
+    validate(need(all(c(t_a, t_b) %in% names(wide)),
+                  "One of the tissues has no observations after filtering."))
+    
+    wide %>%
+      dplyr::mutate(
+        diff_ab = .data[[t_a]] - .data[[t_b]],
+        contrast = paste0(t_a, " - ", t_b)
+      )
   })
   
-  output$translocation_plot <- renderPlot({
-    analysis <- translocation_analysis()
-    validate(need(!is.null(analysis), ""))
+  # ----------------- Translocation plots -----------------
+  
+  output$transloc_counts_plot <- renderPlot({
+    df <- transloc_filtered()
     
-    ggplot(analysis, aes(x = week, y = mean_count, fill = tissue_type)) +
-      geom_col(position = position_dodge(width = 0.8), alpha = 0.7) +
-      facet_grid(fiber_type ~ treatment_category) +
-      theme_minimal() +
-      labs(title = "Microfiber Translocation Across Tissues",
-           x = "Week", y = "Mean Count", fill = "Tissue Type") +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    # Ensure nonempty before plotting
+    validate(need(nrow(df) > 0, "No data to plot."))
+    
+    ggplot2::ggplot(
+      df,
+      ggplot2::aes(x = fiber_concentration, y = mean_count, fill = tissue_type)
+    ) +
+      ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.75), width = 0.7) +
+      ggplot2::geom_errorbar(
+        ggplot2::aes(ymin = pmax(mean_count - sd_count, 0), ymax = mean_count + sd_count),
+        position = ggplot2::position_dodge(width = 0.75), width = 0.2
+      ) +
+      ggplot2::facet_grid(fiber_type ~ treatment, labeller = ggplot2::label_both) +
+      ggplot2::labs(
+        title = paste0("Microfiber counts by tissue (Week ", input$transloc_week, ")"),
+        x = "Fiber concentration (mF/L)", y = "Mean count", fill = "Tissue"
+      ) +
+      ggplot2::theme_minimal(base_size = 12)
   })
   
-  output$tissue_comparison_plot <- renderPlot({
-    analysis <- translocation_analysis()
-    validate(need(!is.null(analysis), ""))
+  output$transloc_diff_plot <- renderPlot({
+    smry <- transloc_summary()
     
-    ggplot(analysis, aes(x = tissue_type, y = prop_nonzero, fill = treatment_category)) +
-      geom_col(position = position_dodge(width = 0.8), alpha = 0.7) +
-      facet_wrap(~ week) +
-      theme_minimal() +
-      labs(title = "Proportion of Non-zero Counts by Tissue",
-           x = "Tissue Type", y = "Proportion Non-zero", fill = "Treatment") +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    validate(need(nrow(smry) > 0, "No differences to plot."))
+    
+    ggplot2::ggplot(
+      smry,
+      ggplot2::aes(x = fiber_concentration, y = diff_ab, fill = treatment)
+    ) +
+      ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+      ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.75), width = 0.7) +
+      ggplot2::facet_grid(fiber_type ~ contrast, labeller = ggplot2::label_both) +
+      ggplot2::labs(
+        title = paste0("Tissue difference (", unique(smry$contrast), ") at Week ", input$transloc_week),
+        x = "Fiber concentration (mF/L)", y = "Mean count difference (A − B)", fill = "Treatment"
+      ) +
+      ggplot2::theme_minimal(base_size = 12)
+  })
+  
+  # ----------------- Translocation table -----------------
+  
+  output$transloc_summary_table <- DT::renderDataTable({
+    smry <- transloc_summary()
+    validate(need(nrow(smry) > 0, "No summary to show."))
+    
+    # Tidy table for inspection/download
+    out <- smry %>%
+      dplyr::arrange(fiber_type, treatment, fiber_concentration) %>%
+      dplyr::select(fiber_type, treatment, week, fiber_concentration,
+                    contrast, dplyr::all_of(input$transloc_tissues), diff_ab)
+    
+    DT::datatable(out, rownames = FALSE, options = list(pageLength = 10, scrollX = TRUE))
   })
   
   # ============================================================================

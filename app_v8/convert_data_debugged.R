@@ -1,6 +1,6 @@
-# Data Conversion Script - DEBUGGED VERSION
-# Run this ONCE locally to optimize data loading
-
+# ============================================================================
+#                       convert_data_debugged.R
+# ============================================================================
 library(readxl)
 library(janitor)
 library(tidyverse)
@@ -17,13 +17,15 @@ if (!dir.exists("data")) {
 }
 
 # Check if Excel files exist
-required_files <- c("Assay_endpoint_DATA_cleaned.xlsx", "physical_endpoint_master_sheet.xlsx", "tissue_weights_clean.xlsx")
-missing_files <- required_files[!file.exists(required_files)]
+required_files <- c(
+  "Assay_endpoint_DATA_cleaned.xlsx",
+  "physical_endpoint_master_sheet.xlsx",
+  "tissue_weights_clean.xlsx"
+)
 
+missing_files <- required_files[!file.exists(required_files)]
 if (length(missing_files) > 0) {
   message("❌ Missing files: ", paste(missing_files, collapse = ", "))
-  message("Current directory: ", getwd())
-  message("Files in directory: ", paste(list.files(), collapse = ", "))
   stop("Please ensure Excel files are in the correct directory")
 }
 
@@ -37,7 +39,7 @@ tryCatch({
   assay_raw <- read_excel("Assay_endpoint_DATA_cleaned.xlsx") %>% 
     clean_names() %>%
     mutate(calculated_concentration = suppressWarnings(as.numeric(calculated_concentration)))
-
+  
   # Apply all static transformations
   assay_processed <- assay_raw %>%
     mutate(
@@ -89,18 +91,17 @@ tryCatch({
     dplyr::select(-week_start, -week_end, -well_number) %>%
     arrange(fiber_type, week, tank) %>%
     as_tibble()
-
-  # Save processed assay data
+  
   saveRDS(assay_processed, "data/assay_data.rds")
   message("✅ Assay data saved to data/assay_data.rds")
-
+  
 }, error = function(e) {
   message("❌ Error processing assay data: ", e$message)
   stop("Failed to process assay data")
 })
 
 # ============================================================================
-# 2. CONVERT PHYSICAL DATA
+# 2. CONVERT PHYSICAL DATA - SIMPLIFIED WITH CONTROL CORRECTION
 # ============================================================================
 
 message("🔄 Processing physical data...")
@@ -108,9 +109,9 @@ message("🔄 Processing physical data...")
 tryCatch({
   physical_raw <- read_excel("physical_endpoint_master_sheet.xlsx") %>%
     clean_names()
-
-  # Process with mf_counts averaging
-  physical_processed <- physical_raw %>%
+  
+  # Add treatment metadata
+  physical_raw <- physical_raw %>%
     mutate(
       tank = as.integer(str_extract(sample, "^[0-9]+")),
       fiber_concentration = case_when(
@@ -130,39 +131,66 @@ tryCatch({
         treatment == "Control" & fiber_concentration == "0",
         "Control", paste(fiber_type, treatment)
       )
-    ) %>%
-    # Process mf_counts averaging efficiently
-    split(.$endpoint) %>%
-    map_dfr(function(.x) {
-      ep <- unique(.x$endpoint)
-      if (identical(ep, "mf_counts")) {
-        .x %>%
-          mutate(
-            sample_base = str_extract(sample, "^[0-9]+"),
-            replicate_id = str_extract(sample, "[0-9]+$")
-          ) %>%
-          group_by(fiber_type, week, tissue_type, endpoint, tank,
-                  treatment, fiber_concentration, sample_base) %>%
-          summarise(
-            value = mean(value, na.rm = TRUE),
-            n_reps = n(),
-            fiber_group = first(fiber_group),
-            .groups = "drop"
-          ) %>%
-          mutate(sample = sample_base) %>%
-          dplyr::select(-sample_base)
-      } else {
-        .x
-      }
-    }) %>%
-    as_tibble()
-
-  # Save processed physical data
+    )
+  
+  # SEPARATE PROCESSING: mf_counts vs others
+  # Process mf_counts separately (has tissue_type, needs averaging)
+  mf_data <- physical_raw %>%
+    filter(endpoint == "mf_counts")
+  
+  # Process other endpoints (no tissue_type, no averaging)
+  other_data <- physical_raw %>%
+    filter(endpoint != "mf_counts")
+  
+  # STEP 1: Control correction for mf_counts ONLY
+  if (nrow(mf_data) > 0) {
+    mf_corrected <- mf_data %>%
+      group_by(fiber_type, week, tissue_type) %>%
+      mutate(
+        avg_control = mean(value[treatment == "Control"], na.rm = TRUE),
+        n_controls = sum(treatment == "Control"),
+        n_nonzero_controls = sum(treatment == "Control" & value > 0),
+        value_corr = if_else(
+          treatment != "Control",
+          pmax(value - avg_control, 0),
+          value
+        )
+      ) %>%
+      ungroup()
+    
+    mf_corrected <- mf_corrected %>%
+      # coerce any blanks like "" to NA, keep numeric zeros
+      dplyr::mutate(
+        value      = suppressWarnings(as.numeric(value)),
+        value_corr = suppressWarnings(as.numeric(value_corr))
+      ) %>%
+      # drop only non-finite rows (NA/NaN/Inf); zeros are finite and kept
+      dplyr::filter(is.finite(value) | is.finite(value_corr))
+    
+    # STEP 2: KEEP REPLICATES (no averaging) for mf_counts
+    mf_noavg <- mf_corrected %>%
+      # optional: parse a replicate_id if your sample encodes it (kept as-is if absent)
+      dplyr::mutate(
+        replicate_id = stringr::str_extract(sample, "(?<=_)\\d+"),
+        value       = round(value, 1),
+        value_corr  = round(value_corr, 1)
+      )
+    
+  } else {
+    mf_noavg <- dplyr::tibble()
+  }
+  
+  # Combine back together (mf_counts with replicates + other endpoints)
+  physical_processed <- dplyr::bind_rows(mf_noavg, other_data) %>%
+    dplyr::arrange(fiber_type, week, endpoint)
+  
   saveRDS(physical_processed, "data/physical_data.rds")
   message("✅ Physical data saved to data/physical_data.rds")
-
+  message("   ✓ Control correction applied to mf_counts")
+  
 }, error = function(e) {
   message("❌ Error processing physical data: ", e$message)
+  print(e)
   stop("Failed to process physical data")
 })
 
@@ -189,14 +217,12 @@ message("✅ Tissue weights saved to data/tissue_weights.rds")
 
 message("\n📁 Verifying created files...")
 
-# Check if all RDS files exist
 rds_files <- c("data/assay_data.rds", "data/physical_data.rds", "data/tissue_weights.rds")
 created_files <- file.exists(rds_files)
 
 if (all(created_files)) {
   message("✅ All RDS files created successfully!")
   
-  # Show file sizes
   get_file_size <- function(file) {
     if (file.exists(file)) {
       size_mb <- round(file.info(file)$size / 1024 / 1024, 2)
@@ -216,75 +242,4 @@ if (all(created_files)) {
   message("❌ Failed to create: ", paste(missing_rds, collapse = ", "))
 }
 
-# ============================================================================
-# 5. CREATE OPTIMIZED GLOBAL.R
-# ============================================================================
-
-global_optimized <- '
-# OPTIMIZED global.R - Uses RDS files for fast loading
-
-# ===== LIBRARIES =====
-library(shiny)
-library(tidyverse)
-library(DT)
-library(glue)
-library(yaml)
-library(stringr)
-library(shinyjs)
-library(emmeans)
-library(broom)
-library(broom.mixed)
-library(car)
-library(lme4)
-library(MASS)
-library(performance)
-
-# ===== UTILITY FUNCTIONS =====
-`%||%` <- function(a, b) if (!is.null(a)) a else b
-filter_choices <- function(x) unlist(x[!startsWith(as.character(x), "#")])
-
-# ===== LOAD OPTIMIZED DATA =====
-message("Loading optimized data...")
-
-# Load pre-processed data (much faster than Excel)
-final_data <- readRDS("data/assay_data.rds")
-physical_master <- readRDS("data/physical_data.rds")
-tissue_weights <- readRDS("data/tissue_weights.rds")
-
-# Extract UI choices
-week_choices_assay <- sort(unique(na.omit(final_data$week)))
-endpoint_choices_assay <- sort(unique(final_data$assay_type))
-endpoint_choices_physical <- sort(unique(physical_master$endpoint))
-
-# Create lookup tables
-tank_fiber_lookup <- final_data %>%
-  select(tank, fiber_type, fiber_concentration, treatment) %>%
-  distinct() %>%
-  arrange(tank)
-
-# Load config
-config <- tryCatch({
-  yaml::read_yaml("config.yml")
-}, error = function(e) {
-  list(
-    assays = endpoint_choices_assay,
-    fibers = c("cotton", "pet"),
-    samples = c("tissue", "gland", "gills")
-  )
-})
-
-message("✅ Global data loading complete!")
-message("📊 Data summary:")
-message("  Assay data: ", nrow(final_data), " rows")
-message("  Physical data: ", nrow(physical_master), " rows")
-message("  Memory usage: ", round(as.numeric(object.size(final_data) + object.size(physical_master))/1024^2, 1), " MB")
-'
-
-writeLines(global_optimized, "global_optimized.R")
-message("📝 Created global_optimized.R")
-
-message("\n🎉 DATA CONVERSION COMPLETE!")
-message("🚀 Next steps:")
-message("1. Replace your current global.R with global_optimized.R")
-message("2. Test your app with: runApp()")
-message("3. Deploy to shinyapps.io when ready")
+message("\n✅ DATA CONVERSION COMPLETE!")
