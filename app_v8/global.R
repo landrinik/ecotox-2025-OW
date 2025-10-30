@@ -16,6 +16,8 @@ library(car)
 library(lme4)
 library(MASS)
 library(performance)
+library(gt)
+library(svglite)
 
 # ===== UTILITY FUNCTIONS =====
 `%||%` <- function(a, b) if (!is.null(a)) a else b

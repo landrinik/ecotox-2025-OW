@@ -403,3 +403,155 @@ create_combined_treatment <- function(data, reference_level = "Control Cotton") 
   
   return(df)
 }
+
+
+
+# ============================================================================
+# EXPORT UTILITIES: high-resolution plots & tables
+# ============================================================================
+
+# ---- Plot styling helpers ----
+#' Consistent report theme for ggplot objects
+theme_report <- function(base_size = 12) {
+  ggplot2::theme_minimal(base_size = base_size) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      legend.position = "right",
+      plot.title = ggplot2::element_text(size = base_size + 2, face = "bold"),
+      axis.title = ggplot2::element_text(size = base_size, face = "bold")
+    )
+}
+
+#' Apply user overrides for title, axis labels, legend, palette
+#' @param p ggplot object
+#' @param title plot title (if non-empty)
+#' @param xlab x-axis label
+#' @param ylab y-axis label
+#' @param legend_pos one of "right", "left", "top", "bottom", "none"
+#' @param palette one of "brewer_set1", "viridis", "greys", "custom"
+#' @return modified ggplot object
+apply_plot_overrides <- function(p, title = NULL, xlab = NULL, ylab = NULL,
+                                 legend_pos = "right", palette = "brewer_set1") {
+  # Apply labels
+  if (!is.null(title) && nzchar(title)) p <- p + ggplot2::ggtitle(title)
+  if (!is.null(xlab)  && nzchar(xlab))  p <- p + ggplot2::xlab(xlab)
+  if (!is.null(ylab)  && nzchar(ylab))  p <- p + ggplot2::ylab(ylab)
+  
+  # Legend position
+  if (!is.null(legend_pos) && legend_pos %in% c("right","left","top","bottom","none")) {
+    p <- p + ggplot2::theme(legend.position = ifelse(legend_pos == "none", "none", legend_pos))
+  }
+  
+  # Color/fill palettes
+  if (palette == "brewer_set1") {
+    p <- p + ggplot2::scale_color_brewer(palette = "Set1") + ggplot2::scale_fill_brewer(palette = "Set1")
+  } else if (palette == "viridis") {
+    p <- p + ggplot2::scale_color_viridis_d() + ggplot2::scale_fill_viridis_d()
+  } else if (palette == "greys") {
+    p <- p + ggplot2::scale_color_grey(start = 0.2, end = 0.6) + ggplot2::scale_fill_grey(start = 0.2, end = 0.6)
+  }
+  p
+}
+
+# ---- Plot saving helpers (300 dpi raster + editable vector) ----
+#' Save a ggplot in all formats: PNG, TIFF, SVG, PDF
+#' @param p ggplot object
+#' @param file_base path without extension
+#' @param width_in width in inches
+#' @param height_in height in inches
+#' @param dpi dots per inch for raster
+save_plot_all_formats <- function(p, file_base, width_in = 7, height_in = 5, dpi = 300) {
+  dir.create(dirname(file_base), recursive = TRUE, showWarnings = FALSE)
+  
+  # Ensure consistent theme
+  p <- p + theme_report()
+  
+  # High-res PNG via ragg (or fallback to png if ragg unavailable)
+  if (requireNamespace("ragg", quietly = TRUE)) {
+    ragg::agg_png(filename = paste0(file_base, ".png"), width = width_in, height = height_in, 
+                  units = "in", res = dpi, scaling = 1)
+    print(p)
+    grDevices::dev.off()
+  } else {
+    grDevices::png(filename = paste0(file_base, ".png"), width = width_in, height = height_in, 
+                   units = "in", res = dpi)
+    print(p)
+    grDevices::dev.off()
+  }
+  
+  # High-res TIFF
+  grDevices::tiff(filename = paste0(file_base, ".tiff"), width = width_in, height = height_in, 
+                  units = "in", res = dpi, compression = "lzw")
+  print(p)
+  grDevices::dev.off()
+  
+  # Editable SVG (requires svglite)
+  if (requireNamespace("svglite", quietly = TRUE)) {
+    svglite::svglite(file = paste0(file_base, ".svg"), width = width_in, height = height_in)
+    print(p)
+    grDevices::dev.off()
+  }
+  
+  # Editable PDF
+  grDevices::pdf(file = paste0(file_base, ".pdf"), width = width_in, height = height_in, 
+                 useDingbats = FALSE)
+  print(p)
+  grDevices::dev.off()
+  
+  invisible(paste0(file_base, c(".png",".tiff",".svg",".pdf")))
+}
+
+# ---- Table (gt) export from a data frame ----
+#' Build a gt table from a data frame with optional title
+#' @param df data frame
+#' @param title optional title for the table
+#' @return gt object
+build_gt_from_df <- function(df, title = NULL) {
+  if (!requireNamespace("gt", quietly = TRUE)) {
+    stop("Package 'gt' is required for table exports. Install via: install.packages('gt')")
+  }
+  gt_tbl <- gt::gt(df)
+  if (!is.null(title) && nzchar(title)) {
+    gt_tbl <- gt::tab_header(gt_tbl, title = gt::md(title))
+  }
+  gt_tbl
+}
+
+#' Save a gt table as PNG, PDF, HTML
+#' @param gt_tbl gt object
+#' @param file_path_no_ext path without extension
+#' @param width_px width in pixels for PNG
+#' @param height_px height in pixels for PNG
+#' @param dpi DPI for PNG rendering
+save_gt_table <- function(gt_tbl, file_path_no_ext, width_px = 2000, height_px = 1400, dpi = 300) {
+  if (!requireNamespace("gt", quietly = TRUE)) {
+    stop("Package 'gt' is required. Install via: install.packages('gt')")
+  }
+  
+  # PNG (high DPI)
+  tryCatch({
+    gt::gtsave(
+      data = gt_tbl,
+      filename = paste0(file_path_no_ext, ".png"),
+      vwidth = width_px, vheight = height_px, dpi = dpi
+    )
+  }, error = function(e) warning("PNG export failed: ", e$message))
+  
+  # PDF (vector editable)
+  tryCatch({
+    gt::gtsave(
+      data = gt_tbl,
+      filename = paste0(file_path_no_ext, ".pdf")
+    )
+  }, error = function(e) warning("PDF export failed: ", e$message))
+  
+  # HTML
+  tryCatch({
+    gt::gtsave(
+      data = gt_tbl,
+      filename = paste0(file_path_no_ext, ".html")
+    )
+  }, error = function(e) warning("HTML export failed: ", e$message))
+  
+  invisible(file_path_no_ext)
+}

@@ -5,7 +5,7 @@ account: landrinik-ecotox
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 15791950
-bundleId: 11049901
+bundleId: 11094242
 url: https://landrinik-ecotox.shinyapps.io/app_v8/
 version: 1
 asMultiple: FALSE
