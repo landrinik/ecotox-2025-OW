@@ -1059,36 +1059,7 @@ ui <- fluidPage(
               # --- Mixed Effects: Random-effects structure (single section) ---
               wellPanel(
                 h5("Random-effects structure"),
-                uiOutput("model_random_effects_ui"),
-
-                # Presets keep the UI small; users can flip to Advanced for full control
-                radioButtons(
-                  "lmer_re_preset", "Preset:",
-                  choices = c(
-                    "Tank + batch (nested)" = "nested_tank_batch",
-                    "Tank only"             = "tank_only",
-                    "Batch only"            = "batch_only",
-                    "Custom (use Advanced)" = "custom"
-                  ),
-                  selected = "nested_tank_batch", inline = FALSE
-                ),
-                checkboxInput("lmer_re_show_advanced", "Show advanced options", value = FALSE),
-                conditionalPanel(
-                  condition = "input.lmer_re_show_advanced",
-                  checkboxGroupInput(
-                    "lmer_random_intercepts", "Random intercepts:",
-                    choices = c("Tank" = "tank", "Experiment batch" = "experiment_batch", "Individual" = "individual_id"),
-                    selected = c("tank", "experiment_batch")
-                  ),
-                  checkboxInput("lmer_nested_batch_tank", "Nest tank within experiment_batch", value = TRUE),
-                  selectInput("lmer_random_slope", "Random slope:",
-                    choices = c(
-                      "None" = "none", "Week within tank" = "week|tank",
-                      "Dose within tank" = "dose_log10|tank", "Week within batch" = "week|experiment_batch"
-                    ),
-                    selected = "none"
-                  )
-                )
+                uiOutput("model_random_effects_ui")
               ),
 
               # --- Mixed Effects: Model settings (remove the duplicate random-intercepts here) ---
@@ -2133,50 +2104,6 @@ server <- function(input, output, session) {
     )
   }
   
-  # --- Startup-safe mirror of Mixed Effects UI selections ----------------------
-
-  rv_lmer <- reactiveValues(
-    random_intercepts   = character(0),
-    nested_batch_tank   = TRUE
-  )
-
-  # Initialize once the UI is rendered
-  session$onFlushed(function() {
-    observe(
-      {
-        rv_lmer$random_intercepts <- get_input_value(
-          input, c("lmer_random_intercepts", "lmerrandomintercepts"), character(0)
-        )
-        rv_lmer$random_slope <- get_input_value(
-          input, c("lmer_random_slope", "lmerrandomslope"), "none"
-        )
-        rv_lmer$nested_batch_tank <- isTRUE(get_input_value(
-          input, c("lmer_nested_batch_tank", "lmernestedbatchtank"), TRUE
-        ))
-      },
-      priority = 100
-    )
-  }, once = TRUE)
-
-  # Keep mirror updated after UI changes (ignoreInit avoids startup reads)
-  observeEvent(get_input_value(input, c("lmer_random_intercepts", "lmerrandomintercepts")),
-    {
-      rv_lmer$random_intercepts <- get_input_value(
-        input, c("lmer_random_intercepts", "lmerrandomintercepts"), character(0)
-      )
-    },
-    ignoreInit = TRUE
-  )
-
-  observeEvent(get_input_value(input, c("lmer_nested_batch_tank", "lmernestedbatchtank")),
-    {
-      rv_lmer$nested_batch_tank <- isTRUE(get_input_value(
-        input, c("lmer_nested_batch_tank", "lmernestedbatchtank"), TRUE
-      ))
-    },
-    ignoreInit = TRUE
-  )
-
   # --- Mixed Effects: endpoint selection that preserves user choice -------------
 
   # Remember the user’s last explicit endpoint
@@ -2251,32 +2178,25 @@ server <- function(input, output, session) {
     })
   }, once = TRUE)
 
-  build_random_terms <- function(df,
-                                 intercepts = c("tank"),
-                                 nested_batch_tank = FALSE,
-                                 slope_spec = "none") {
-    terms <- character(0)
+  build_random_terms <- function(df, include_time_slope = TRUE) {
+    validate(need("tank" %in% names(df), "Random-effects require a tank column."))
+    n_tanks <- dplyr::n_distinct(df$tank)
+    validate(need(n_tanks >= 2L, "Random-effects require at least 2 tanks in the filtered data."))
     
-    # always add tank intercept if estimable
-    if ("tank" %in% names(df) && dplyr::n_distinct(df$tank) >= 3L) {
-      terms <- c(terms, "(1|tank)")
+    slope_ok <- isTRUE(include_time_slope) &&
+      ("time_wk_z" %in% names(df)) &&
+      !all(is.na(df$time_wk_z)) &&
+      isTRUE(stats::sd(df$time_wk_z, na.rm = TRUE) > 0)
+    
+    if (!slope_ok && isTRUE(include_time_slope)) {
+      message("[lmer] Tank-level week slope requested but time_wk_z is missing/constant; using intercept only.")
     }
     
-    # optional: add slope if requested and supported
-    if (!identical(slope_spec, "none") && grepl("\\|", slope_spec, fixed = TRUE)) {
-      lhs <- trimws(sub("^(.*)\\|.*$", "\\1", slope_spec))
-      grp <- trimws(sub("^.*\\|(.*)$", "\\1", slope_spec))
-      if (all(c(lhs, grp) %in% names(df)) && dplyr::n_distinct(df[[grp]]) >= 2L) {
-        terms <- unique(c(terms, sprintf("(1 + %s | %s)", lhs, grp)))
-        terms <- setdiff(terms, "(1|tank)")  # drop pure intercept if combined term present
-      }
+    if (slope_ok) {
+      "(1 + time_wk_z | tank)"
+    } else {
+      "(1 | tank)"
     }
-    
-    if (length(terms) == 0L) {
-      validate(need(FALSE, "Random-effects require a tank column with ≥ 3 levels."))
-    }
-    
-    terms
   }
   
   output$model_random_effects_ui <- renderUI({
@@ -2323,36 +2243,6 @@ server <- function(input, output, session) {
         experiment_batch    = safe_get(., "experiment_batch", "batch", "experiment_id")
       )
   }
-
-  # wire the preset to the advanced controls
-  observeEvent(input$lmer_re_preset,
-    {
-      preset <- input$lmer_re_preset %||% "nested_tank_batch"
-
-      if (preset == "nested_tank_batch") {
-        updateCheckboxGroupInput(session, "lmer_random_intercepts",
-          selected = c("tank", "experiment_batch")
-        )
-        updateCheckboxInput(session, "lmer_nested_batch_tank", value = TRUE)
-        updateSelectInput(session, "lmer_random_slope", selected = "none")
-      } else if (preset == "tank_only") {
-        updateCheckboxGroupInput(session, "lmer_random_intercepts",
-          selected = c("tank")
-        )
-        updateCheckboxInput(session, "lmer_nested_batch_tank", value = FALSE)
-        updateSelectInput(session, "lmer_random_slope", selected = "none")
-      } else if (preset == "batch_only") {
-        updateCheckboxGroupInput(session, "lmer_random_intercepts",
-          selected = c("experiment_batch")
-        )
-        updateCheckboxInput(session, "lmer_nested_batch_tank", value = FALSE)
-        updateSelectInput(session, "lmer_random_slope", selected = "none")
-      } else {
-        # custom: leave advanced inputs as the user set them
-      }
-    },
-    ignoreInit = FALSE
-  )
 
   # --- Helpers for EMMeans ---
 
@@ -3324,16 +3214,9 @@ server <- function(input, output, session) {
     n_batch <- if ("experiment_batch" %in% names(df)) dplyr::n_distinct(df$experiment_batch) else 0L
     message(sprintf("[lmer] groups: tank=%d, batch=%d", n_tank, n_batch))
     
-    if (input$lmer_re_preset %in% c("nested_tank_batch", "batch_only") && n_batch < 2L) {
-      showNotification(
-        "Experiment batch has < 2 levels in the filtered data; using tank-only random intercept.",
-        type = "message", duration = 6
-      )
-    }
-    
     validate(need(
-      ("experiment_batch" %in% names(df)) || ("tank" %in% names(df)),
-      "Random-effects require experiment_batch and/or tank columns."
+      "tank" %in% names(df),
+      "Random-effects require a 'tank' column in the selected data."
     ))
     
     # ---------- Dose encoding ----------
@@ -3380,44 +3263,7 @@ server <- function(input, output, session) {
     }
     if (length(rhs_terms) == 0L) rhs_terms <- "1"
     
-    # ---------- NA-safe batch/fiber confounding (logging only) ----------
-    n_batch_clean <- if ("experiment_batch" %in% names(df)) dplyr::n_distinct(stats::na.omit(df$experiment_batch)) else 0L
-    n_fiber       <- if ("fiber_type" %in% names(df)) dplyr::n_distinct(df$fiber_type) else 0L
-    confounded_batch_fiber <- (
-      "experiment_batch" %in% names(df) && "fiber_type" %in% names(df) &&
-        n_batch_clean >= 2L && n_fiber >= 2L &&
-        dplyr::n_distinct(interaction(df$experiment_batch, df$fiber_type, drop = TRUE)) == n_batch_clean
-    )
-    
-    # ---------- Random intercept choices ----------
-    re_intercepts <- rv_lmer$random_intercepts
-    if (n_batch_clean < 2L || isTRUE(confounded_batch_fiber)) {
-      re_intercepts <- setdiff(re_intercepts, "experiment_batch")
-      showNotification(
-        if (n_batch_clean < 2L)
-          "Experiment batch has < 2 levels; dropping batch random effect for this fit."
-        else
-          "Experiment batch is perfectly confounded with fiber; dropping batch random effect for this fit.",
-        type = "message", duration = 6
-      )
-    }
-    
-    # ---------- Random slope: checkbox drives unless advanced dropdown is explicitly set ----------
-    have_tank <- "tank" %in% names(df) && dplyr::n_distinct(df$tank) >= 2L
-    
-    # Advanced dropdown (if user changes it)
-    slope_from_advanced <- isolate(input$lmer_random_slope)
-    
-    # Quick checkbox (simple UI for common case)
-    slope_from_checkbox <- if (isTRUE(input$include_tank_time_slope)) "time_wk_z|tank" else "none"
-    
-    
-    # Precedence: advanced dropdown only if user explicitly set it to something other than "none"
-    slope_spec <- if (!is.null(slope_from_advanced) && !identical(slope_from_advanced, "none")) {
-      slope_from_advanced
-    } else {
-      slope_from_checkbox
-    }
+    include_time_slope <- isTRUE(input$include_tank_time_slope)
     
     # ---------- Guarantee time_wk_z exists before building random terms ----------
     if (!("time_wk_z" %in% names(df))) {
@@ -3428,9 +3274,7 @@ server <- function(input, output, session) {
     }
     
     # Build random terms with your existing helper
-    random_terms <- build_random_terms(df, intercepts = c("tank"),
-                                       nested_batch_tank = FALSE,
-                                       slope_spec = slope_spec)
+    random_terms <- build_random_terms(df, include_time_slope = include_time_slope)
     
     fixed_str  <- paste("outcome ~", paste(rhs_terms, collapse = " + "))
     full_form  <- stats::as.formula(paste(fixed_str, "+", paste(random_terms, collapse = " + ")))
@@ -3440,13 +3284,10 @@ server <- function(input, output, session) {
                                                       optCtrl = list(maxfun = 20000)))
     
     # Optional: fallback if singular with slope ON
-    if (!identical(slope_spec, "none") && isTRUE(lme4::isSingular(fit_obj, tol = 1e-4))) {
+    slope_was_used <- include_time_slope && grepl("time_wk_z", random_terms, fixed = TRUE)
+    if (slope_was_used && isTRUE(lme4::isSingular(fit_obj, tol = 1e-4))) {
       showNotification("Singular fit with tank time slope; refitting without slope for stability.", type = "warning", duration = 6)
-      random_terms2 <- build_random_terms(
-        df = df, intercepts = re_intercepts,
-        nested_batch_tank = rv_lmer$nested_batch_tank && (n_batch_clean >= 2L) && !confounded_batch_fiber,
-        slope_spec = "none"
-      )
+      random_terms2 <- build_random_terms(df = df, include_time_slope = FALSE)
       full_form2 <- stats::as.formula(paste(fixed_str, "+", paste(random_terms2, collapse = " + ")))
       fit_obj <- lme4::lmer(
         formula = full_form2, data = df, REML = TRUE,
