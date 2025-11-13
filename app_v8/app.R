@@ -3167,10 +3167,18 @@ server <- function(input, output, session) {
       )
     }
     
-    # Ensure 'time_wk' (numeric) and 'time_wk_z' (centered per week) exist for random slope
-    df$time_wk <- suppressWarnings(as.numeric(df$week))
-    df$time_wk_z <- as.numeric(scale(suppressWarnings(as.numeric(df$week)), 
-                                     center = TRUE, scale = FALSE))
+    # Ensure 'time_wk' (numeric) and 'time_wk_z' (centered within tank) exist for random slope
+    df <- df %>%
+      dplyr::mutate(time_wk = suppressWarnings(as.numeric(week))) %>%
+      dplyr::group_by(tank) %>%
+      dplyr::mutate(
+        time_wk_z = ifelse(
+          is.finite(time_wk),
+          time_wk - mean(time_wk, na.rm = TRUE),
+          NA_real_
+        )
+      ) %>%
+      dplyr::ungroup()
     
     # Create dose encodings and numeric outcome BEFORE finite filter
     validate(need(outcome_col %in% names(df), sprintf("Column '%s' not found in selected data.", outcome_col)))
@@ -3223,13 +3231,6 @@ server <- function(input, output, session) {
     use_dose_as_factor <- isTRUE(input$lmer_dose_as_factor)
     dose_term <- if (use_dose_as_factor) "dose_factor" else "dose_log10"
     
-    # ---------- Guarantee time_wk_z availability (if user bypassed caching somehow) ----------
-    if (!("time_wk_z" %in% names(df))) {
-      time_raw <- if ("time_wk" %in% names(df)) df$time_wk else df$week
-      if (!is.numeric(time_raw)) time_raw <- suppressWarnings(as.numeric(as.character(time_raw)))
-      df$time_wk_z <- as.numeric(scale(time_raw, center = TRUE, scale = FALSE))
-    }
-    
     # ---------- Estimability gates for fixed effects ----------
     include_fiber <- "fiber_type" %in% names(df) && dplyr::n_distinct(df$fiber_type) >= 2L
     include_trt   <- "chem_treatment" %in% names(df) && dplyr::n_distinct(df$chem_treatment) >= 2L
@@ -3268,9 +3269,19 @@ server <- function(input, output, session) {
     # ---------- Guarantee time_wk_z exists before building random terms ----------
     if (!("time_wk_z" %in% names(df))) {
       time_raw <- if ("time_wk" %in% names(df)) df$time_wk else df$week
-      if (!is.numeric(time_raw)) time_raw <- suppressWarnings(as.numeric(as.character(time_raw)))
-      df$time_wk_z <- as.numeric(scale(time_raw, center = TRUE, scale = FALSE))
-      message("[lmer] created time_wk_z on the fly (mean=", round(mean(df$time_wk_z, na.rm=TRUE), 2), ")")
+      time_raw <- suppressWarnings(as.numeric(as.character(time_raw)))
+      df$time_wk <- time_raw
+      df <- df %>%
+        dplyr::group_by(tank) %>%
+        dplyr::mutate(
+          time_wk_z = ifelse(
+            is.finite(time_wk),
+            time_wk - mean(time_wk, na.rm = TRUE),
+            NA_real_
+          )
+        ) %>%
+        dplyr::ungroup()
+      message("[lmer] created time_wk_z on the fly (within-tank centering)")
     }
     
     # Build random terms with your existing helper
@@ -3283,17 +3294,14 @@ server <- function(input, output, session) {
                           control = lme4::lmerControl(optimizer = "bobyqa",
                                                       optCtrl = list(maxfun = 20000)))
     
-    # Optional: fallback if singular with slope ON
-    slope_was_used <- include_time_slope && grepl("time_wk_z", random_terms, fixed = TRUE)
-    if (slope_was_used && isTRUE(lme4::isSingular(fit_obj, tol = 1e-4))) {
-      showNotification("Singular fit with tank time slope; refitting without slope for stability.", type = "warning", duration = 6)
-      random_terms2 <- build_random_terms(df = df, include_time_slope = FALSE)
-      full_form2 <- stats::as.formula(paste(fixed_str, "+", paste(random_terms2, collapse = " + ")))
-      fit_obj <- lme4::lmer(
-        formula = full_form2, data = df, REML = TRUE,
-        control = lme4::lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 20000))
+    message("[lmer] random terms used: ", paste(random_terms, collapse = " + "))
+    
+    singular_fit <- tryCatch(lme4::isSingular(fit_obj, tol = 1e-4), error = function(e) NA)
+    if (isTRUE(singular_fit)) {
+      showNotification(
+        "Random effects are singular with the requested structure; estimates may be unstable.",
+        type = "warning", duration = 6
       )
-      message("[lmer] refit without slope; random: ", paste(random_terms2, collapse = " + "))
     }
     
     fit_obj
