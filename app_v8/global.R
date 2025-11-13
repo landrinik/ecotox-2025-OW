@@ -18,6 +18,10 @@ library(MASS)
 library(performance)
 library(gt)
 library(svglite)
+library(DHARMa)
+library(lmtest)     
+library(sandwich)     
+library(splines)      
 
 # ===== UTILITY FUNCTIONS =====
 `%||%` <- function(a, b) if (!is.null(a)) a else b

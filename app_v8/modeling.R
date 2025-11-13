@@ -1,66 +1,119 @@
 # Statistical Modeling Functions
 # Optimized for count data and mixed effects
 
+# Always create a centered numeric time covariate from 'week' (or 'time_wk' if present)
+prepare_time_wk <- function(df) {
+  # prefer time_wk if present, else coerce week
+  time_raw <- if ("time_wk" %in% names(df)) df$time_wk else df$week
+  
+  # coerce to numeric if needed
+  if (!is.numeric(time_raw)) {
+    time_raw <- suppressWarnings(as.numeric(as.character(time_raw)))
+  }
+  
+  # if everything failed but df$week is numeric, use it
+  if (all(is.na(time_raw)) && is.numeric(df$week)) time_raw <- df$week
+  
+  # center without scaling (keep slope in per-week units)
+  df$time_wk_z <- as.numeric(scale(time_raw, center = TRUE, scale = FALSE))
+  
+  df
+}
+
+
 # ===== ENHANCED MODEL FITTING =====
-# Enhanced modeling for count data (mf_counts) with automatic family selection
-fit_endpoint_model <- function(df, endpoint_name, model_type = "lmer") {
+# Main fitter gains a switch for the random slope
+fit_endpoint_model <- function(df,
+                               endpoint_name,
+                               model_type = "lmer",
+                               include_tank_time_slope = TRUE) {
+  df <- prepare_time_wk(df)
+  
+  # Only tank random effects; optional time slope in tank
+  rand_tank <- if (isTRUE(include_tank_time_slope)) {
+    "(1 + time_wk_z | tank)"     # random intercept + week slope per tank
+  } else {
+    "(1 | tank)"                 # random intercept per tank only
+  }
+  
   if (endpoint_name == "mf_counts" && model_type %in% c("glmer", "glm")) {
-    # Test for overdispersion in count data
     mean_val <- mean(df$outcome, na.rm = TRUE)
-    var_val <- var(df$outcome, na.rm = TRUE)
+    var_val  <- var(df$outcome, na.rm = TRUE)
     dispersion_ratio <- ifelse(mean_val > 0, var_val / mean_val, 1)
     
     if (dispersion_ratio > 2) {
-      # Use negative binomial for overdispersed counts
+      # Negative binomial counts
       if (model_type == "glm") {
         model <- MASS::glm.nb(
           outcome ~ treatment_category * week * log(fiber_concentration_numeric + 1),
           data = df
         )
+        family_used <- "negative_binomial"
       } else {
         model <- lme4::glmer.nb(
-          outcome ~ treatment_category * week * log(fiber_concentration_numeric + 1) + 
-            (1 | tank) + (1 | experiment_batch),
-          data = df
+          stats::as.formula(
+            paste(
+              "outcome ~ treatment_category * week * log(fiber_concentration_numeric + 1) +",
+              rand_tank
+            )
+          ),
+          data = df,
+          control = lme4::glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
         )
+        family_used <- "negative_binomial"
       }
-      family_used <- "negative_binomial"
     } else {
-      # Use Poisson for equidispersed counts
+      # Poisson counts
       if (model_type == "glm") {
-        model <- glm(
+        model <- stats::glm(
           outcome ~ treatment_category * week * log(fiber_concentration_numeric + 1),
           family = poisson(), data = df
         )
+        family_used <- "poisson"
       } else {
         model <- lme4::glmer(
-          outcome ~ treatment_category * week * log(fiber_concentration_numeric + 1) + 
-            (1 | tank) + (1 | experiment_batch),
-          family = poisson(), data = df
+          stats::as.formula(
+            paste(
+              "outcome ~ treatment_category * week * log(fiber_concentration_numeric + 1) +",
+              rand_tank
+            )
+          ),
+          family = poisson(), data = df,
+          control = lme4::glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
         )
+        family_used <- "poisson"
       }
-      family_used <- "poisson"
     }
   } else {
-    # Use linear models for continuous data
+    # Continuous endpoints
     if (model_type == "lm") {
-      model <- lm(outcome ~ treatment_category * week * fiber_concentration_numeric, data = df)
-    } else {
-      model <- lme4::lmer(
-        outcome ~ treatment_category * week * fiber_concentration_numeric + 
-          (1 | tank) + (1 | experiment_batch), 
+      model <- stats::lm(
+        outcome ~ treatment_category * week * fiber_concentration_numeric,
         data = df
       )
+      family_used <- "gaussian"
+      dispersion_ratio <- NA_real_
+    } else {
+      model <- lme4::lmer(
+        stats::as.formula(
+          paste(
+            "outcome ~ treatment_category * week * fiber_concentration_numeric +",
+            rand_tank
+          )
+        ),
+        data = df,
+        control = lme4::lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+      )
+      family_used <- "gaussian"
+      dispersion_ratio <- NA_real_
     }
-    family_used <- "gaussian"
-    dispersion_ratio <- NA
   }
   
-  return(list(
-    model = model, 
-    family = family_used, 
-    dispersion_ratio = dispersion_ratio
-  ))
+  list(
+    model = model,
+    family = family_used,
+    dispersion_ratio = if (exists("dispersion_ratio")) dispersion_ratio else NA_real_
+  )
 }
 
 # ===== RECOVERY ANALYSIS =====
@@ -120,36 +173,27 @@ analyze_translocation <- function(df) {
 }
 
 # ===== MIXED EFFECTS MODEL BUILDING =====
-build_lmer_formula <- function(include_three_way = TRUE, dose_by_fiber = FALSE, 
-                              dose_by_treat = FALSE, include_recovery = FALSE,
-                              random_terms = c("tank", "experiment_batch")) {
+# Optional: formula builder with slope switch (used wherever you construct formulas)
+build_lmer_formula <- function(include_three_way = TRUE,
+                               dose_by_fiber = FALSE,
+                               dose_by_treat = FALSE,
+                               include_recovery = FALSE,
+                               random_intercepts = character(0),
+                               include_time_slope = TRUE,
+                               slope_var = "time_wk_z",
+                               slope_group = "tank") {
+  base_formula <- "outcome ~ fiber_type * chem_treatment + week + fiber_concentration +
+                   fiber_type:week + chem_treatment:week + is_control * fiber_type + dose_log10"
+  if (isTRUE(include_three_way)) base_formula <- paste(base_formula, "+ fiber_type:chem_treatment:week")
+  if (isTRUE(dose_by_fiber))    base_formula <- paste(base_formula, "+ dose_log10:fiber_type")
+  if (isTRUE(dose_by_treat))    base_formula <- paste(base_formula, "+ dose_log10:chem_treatment")
+  if (isTRUE(include_recovery)) base_formula <- paste(base_formula, "+ is_recovery + is_recovery:chem_treatment + is_recovery:dose_log10")
   
-  # Base formula
-  base_formula <- "outcome ~ fiber_type * chem_treatment + week + fiber_concentration + 
-                    fiber_type:week + chem_treatment:week + is_control * fiber_type + dose_log10"
-  
-  # Add optional interactions
-  if (include_three_way) {
-    base_formula <- paste(base_formula, "+ fiber_type:chem_treatment:week")
-  }
-  
-  if (dose_by_fiber) {
-    base_formula <- paste(base_formula, "+ dose_log10:fiber_type")
-  }
-  
-  if (dose_by_treat) {
-    base_formula <- paste(base_formula, "+ dose_log10:chem_treatment")
-  }
-  
-  if (include_recovery) {
-    base_formula <- paste(base_formula, "+ is_recovery + is_recovery:chem_treatment + is_recovery:dose_log10")
-  }
-  
-  # Add random effects
-  random_effects <- paste(sprintf("(1|%s)", random_terms), collapse = " + ")
-  final_formula <- paste(base_formula, "+", random_effects)
-  
-  return(as.formula(final_formula))
+  rand_parts <- c(
+    if (isTRUE(include_time_slope)) sprintf("(1 + %s | %s)", slope_var, slope_group) else "(1 | tank)",
+    if (length(random_intercepts)) sprintf("(1|%s)", random_intercepts) else NULL
+  )
+  as.formula(paste(base_formula, "+", paste(rand_parts, collapse = " + ")))
 }
 
 # ===== MODEL DIAGNOSTICS =====
