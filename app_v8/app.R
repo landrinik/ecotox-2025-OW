@@ -2178,7 +2178,7 @@ server <- function(input, output, session) {
     })
   }, once = TRUE)
 
-  build_random_terms <- function(df, include_time_slope = TRUE) {
+  build_random_terms <- function(df, include_time_slope = TRUE, include_batch_effect = TRUE) {
     validate(need("tank" %in% names(df), "Random-effects require a tank column."))
     n_tanks <- dplyr::n_distinct(df$tank)
     validate(need(n_tanks >= 2L, "Random-effects require at least 2 tanks in the filtered data."))
@@ -2191,12 +2191,26 @@ server <- function(input, output, session) {
     if (!slope_ok && isTRUE(include_time_slope)) {
       message("[lmer] Tank-level week slope requested but time_wk_z is missing/constant; using intercept only.")
     }
+    random_terms <- character()
+    random_terms <- c(random_terms, if (slope_ok) "(1 + time_wk_z | tank)" else "(1 | tank)")
     
-    if (slope_ok) {
-      "(1 + time_wk_z | tank)"
-    } else {
-      "(1 | tank)"
+    if (isTRUE(include_batch_effect) && "experiment_batch" %in% names(df)) {
+      batch_vec <- stats::na.omit(df$experiment_batch)
+      n_batch <- dplyr::n_distinct(batch_vec)
+      if (n_batch >= 2L) {
+        # Detect when batch aligns perfectly with fiber type so users can interpret correctly
+        confounded <- ("fiber_type" %in% names(df)) &&
+          dplyr::n_distinct(df$fiber_type) == n_batch &&
+          dplyr::n_distinct(interaction(df$experiment_batch, df$fiber_type, drop = TRUE)) == n_batch
+        if (confounded) {
+          message("[lmer] experiment_batch matches fiber_type levels; random batch intercept will absorb fiber-specific shifts.")
+        }
+        random_terms <- c(random_terms, "(1 | experiment_batch)")
+      } else if (isTRUE(include_batch_effect)) {
+        message("[lmer] experiment_batch has <2 levels after filtering; omitting batch random effect.")
+      }
     }
+    random_terms
   }
   
   output$model_random_effects_ui <- renderUI({
@@ -3154,6 +3168,22 @@ server <- function(input, output, session) {
     )
     df$experiment_batch <- dplyr::coalesce(!!!cand_batch)
     df$experiment_batch <- ifelse(is.na(df$experiment_batch), NA_character_, trimws(tolower(df$experiment_batch)))
+    # Derive experiment_batch from fiber_type when missing; two historical experiments
+    # correspond to cotton and PET respectively.
+    batch_raw <- df$experiment_batch
+    missing_batch <- is.na(batch_raw) | (!is.na(batch_raw) & !nzchar(batch_raw))
+    df$experiment_batch <- dplyr::case_when(
+      !missing_batch ~ batch_raw,
+      !is.na(df$fiber_type) & df$fiber_type == "cotton" ~ "experiment_cotton",
+      !is.na(df$fiber_type) & df$fiber_type == "pet" ~ "experiment_pet",
+      TRUE ~ NA_character_
+    )
+    derived_batches <- sum(missing_batch & !is.na(df$experiment_batch))
+    if (derived_batches > 0) {
+      message(sprintf("[lmer-data] filled %d experiment_batch values based on fiber_type.", derived_batches))
+    }
+    
+    df$experiment_batch <- ifelse(is.na(df$experiment_batch), NA_character_, df$experiment_batch)
     df$tank <- if ("tank" %in% names(df)) trimws(tolower(as.character(df$tank))) else NA_character_
     
     # Availability log and gentle notice
