@@ -3369,6 +3369,10 @@ server <- function(input, output, session) {
                           control = lme4::lmerControl(optimizer = "bobyqa",
                                                       optCtrl = list(maxfun = 20000)))
     
+    # Keep a reference to the data so downstream emmeans calls can rebuild grids
+    attr(fit_obj, "data_used") <- df
+    attr(fit_obj, "emm_params") <- list()
+    
     message("[lmer] random terms used: ", paste(random_terms, collapse = " + "))
     
     singular_fit <- tryCatch(lme4::isSingular(fit_obj, tol = 1e-4), error = function(e) NA)
@@ -3777,6 +3781,7 @@ server <- function(input, output, session) {
     response_nm <- all.vars(update(fixed_part, . ~ 0))[1]
     
     adjust_notes <- character()
+    emm_params <- list()
     
     # Ensure numeric week column for optional spline
     df$week_numeric <- suppressWarnings(as.numeric(as.character(df$week)))
@@ -3803,6 +3808,7 @@ server <- function(input, output, session) {
       if (any(is.finite(df$week_numeric))) {
         spline_df <- as.integer(input$lmer_refit_spline_df %||% 3)
         fixed_part <- update(fixed_part, . ~ . + splines::ns(week_numeric, spline_df))
+        emm_params$spline_df <- spline_df
         adjust_notes <- c(adjust_notes, sprintf("Added natural spline for week (df = %d).", spline_df))
       } else {
         showNotification("Spline skipped: numeric week is not available.", type = "warning", duration = 6)
@@ -3880,7 +3886,10 @@ server <- function(input, output, session) {
       }
     )
     
-    list(model = fit_obj, formula = final_form, notes = adjust_notes)
+    attr(fit_obj, "data_used") <- df
+    attr(fit_obj, "emm_params") <- emm_params
+    
+    list(model = fit_obj, formula = final_form, notes = adjust_notes, data = df, params = emm_params)
   })
   
   lmer_refit_diag <- reactive({
@@ -3928,11 +3937,21 @@ server <- function(input, output, session) {
   active_lmer_model <- reactive({
     refit_obj <- tryCatch(lmer_refit_model(), error = function(e) NULL)
     if (is.list(refit_obj) && inherits(refit_obj$model, "lmerMod")) {
-      return(list(model = refit_obj$model, source = "refit"))
+      return(list(
+        model = refit_obj$model,
+        source = "refit",
+        data = refit_obj$data,
+        params = refit_obj$params
+      ))
     }
     
     base_fit <- tryCatch(lmer_model(), error = function(e) NULL)
-    list(model = base_fit, source = "base")
+    list(
+      model = base_fit,
+      source = "base",
+      data = attr(base_fit, "data_used", exact = TRUE),
+      params = attr(base_fit, "emm_params", exact = TRUE)
+    )
   })
   
   # ============================================================================
@@ -5424,6 +5443,15 @@ server <- function(input, output, session) {
           "Run the mixed effects model first"
         ))
         
+        # Keep a handle to the data/params used for the fit so emmeans can rebuild
+        emm_data <- active_fit$data %||% attr(mdl, "data_used", exact = TRUE)
+        if (is.null(emm_data)) {
+          emm_data <- tryCatch(lme4::getME(mdl, "frame"), error = function(e) NULL)
+        }
+        emm_params <- active_fit$params %||% attr(mdl, "emm_params", exact = TRUE)
+        if (is.null(emm_params)) emm_params <- list()
+        
+        
         message(sprintf("[emmeans] using %s mixed model", active_fit$source))
 
         # Match the model's dose encoding and build 'at='
@@ -5434,39 +5462,46 @@ server <- function(input, output, session) {
         # Build a spec that only uses variables present in the model
         requested <- as.character(input$lmer_emmeans_by %||% "treatment")
         emm_specs <- make_safe_emm_specs(requested, mdl)
+        
+        mf_names <- names(stats::model.frame(mdl))
+        can_use_at <- FALSE
+        if (use_dose_as_factor && "dose_factor" %in% mf_names) {
+          can_use_at <- TRUE
+        } else if (!use_dose_as_factor && all(c("dose_log10", "is_control") %in% mf_names)) {
+          can_use_at <- TRUE
+        }
+        
+        run_emm <- function(specs = emm_specs, with_at = FALSE) {
+          args <- list(object = mdl, specs = specs)
+          if (with_at && length(at_list)) args$at <- at_list
+          if (!is.null(emm_data)) args$data <- emm_data
+          if (length(emm_params)) args$params <- emm_params
+          do.call(emmeans::emmeans, args)
+        }
 
         # If the spec reduced to ~1 (nothing estimable), fall back to treatment if available
         if (identical(format(emm_specs), "~1")) {
-          mf_names <- names(stats::model.frame(mdl))
           if ("chem_treatment" %in% mf_names) emm_specs <- ~chem_treatment
         }
 
         # Try full emmeans with 'at' when appropriate
         emm <- tryCatch(
           {
-            # Only pass 'at' if the model actually has the dose variables in use
-            if (use_dose_as_factor && "dose_factor" %in% names(stats::model.frame(mdl))) {
-              emmeans::emmeans(mdl, specs = emm_specs, at = at_list)
-            } else if (!use_dose_as_factor && all(c("dose_log10", "is_control") %in% names(stats::model.frame(mdl)))) {
-              emmeans::emmeans(mdl, specs = emm_specs, at = at_list)
-            } else {
-              emmeans::emmeans(mdl, specs = emm_specs)
-            }
+            run_emm(with_at = can_use_at)
           },
           error = function(e1) {
             message("Primary emmeans failed, retrying without 'at=': ", e1$message)
             tryCatch(
               {
-                emmeans::emmeans(mdl, specs = emm_specs)
+                run_emm(with_at = FALSE)
               },
               error = function(e2) {
                 message("Fallback emmeans failed, using simplest spec: ", e2$message)
                 # Final fallback: single available factor, or stop
-                mf_names <- names(stats::model.frame(mdl))
                 if ("chem_treatment" %in% mf_names) {
-                  emmeans::emmeans(mdl, specs = ~chem_treatment)
+                  run_emm(specs = ~chem_treatment)
                 } else if ("week" %in% mf_names) {
-                  emmeans::emmeans(mdl, specs = ~week)
+                  run_emm(specs = ~week)
                 } else {
                   stop("No suitable factor is available in the model for EMMeans.")
                 }
