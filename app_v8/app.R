@@ -3924,6 +3924,17 @@ server <- function(input, output, session) {
       DT::formatRound("value", 6)
   })
   
+  # Helper reactive: prefer refit model (if available) for downstream EMMeans/contrasts
+  active_lmer_model <- reactive({
+    refit_obj <- tryCatch(lmer_refit_model(), error = function(e) NULL)
+    if (is.list(refit_obj) && inherits(refit_obj$model, "lmerMod")) {
+      return(list(model = refit_obj$model, source = "refit"))
+    }
+    
+    base_fit <- tryCatch(lmer_model(), error = function(e) NULL)
+    list(model = base_fit, source = "base")
+  })
+  
   # ============================================================================
   # ENHANCED EMMEANS WITH COLORED SIGNIFICANCE & DID ANALYSIS
   # ============================================================================
@@ -5382,12 +5393,15 @@ server <- function(input, output, session) {
   lmer_emmeans_results <- eventReactive(input$lmer_run_emmeans, {
     tryCatch(
       {
-        # Require a fitted mixed model first
-        mdl <- lmer_model()
+        # Require a fitted mixed model first (prefer refit when available)
+        active_fit <- active_lmer_model()
+        mdl <- active_fit$model
         validate(need(
-          !is.null(mdl) && !inherits(mdl, "list"),
+          !is.null(mdl) && inherits(mdl, "lmerMod"),
           "Run the mixed effects model first"
         ))
+        
+        message(sprintf("[emmeans] using %s mixed model", active_fit$source))
 
         # Match the model's dose encoding and build 'at='
         use_dose_as_factor <- isTRUE(input$lmer_dose_as_factor)
@@ -5462,7 +5476,8 @@ server <- function(input, output, session) {
           emmeans = emm,
           emmeans_df = emm_tbl,
           emmeans_plot = emm_plot,
-          specification_used = req_txt
+          specification_used = req_txt,
+          model_source = active_fit$source
         )
       },
       error = function(e) {
@@ -5499,8 +5514,9 @@ server <- function(input, output, session) {
 
   # ---- Mixed effects pairwise table (DT) ----
   output$lmer_pairwise_table <- DT::renderDataTable({
-    m <- lmer_model()
-    validate(need(!is.null(m), "Run the mixed effects model first."))
+    active_fit <- active_lmer_model()
+    m <- active_fit$model
+    validate(need(!is.null(m) && inherits(m, "lmerMod"), "Run the mixed effects model first."))
 
     adj_method <- input$lmer_adjustment_method %||% "tukey"
 
