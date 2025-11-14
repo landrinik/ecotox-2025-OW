@@ -1141,6 +1141,47 @@ ui <- fluidPage(
                   DT::dataTableOutput("lmer_refit_table")
                 )
               
+              ),
+              
+              br(),
+              wellPanel(
+                h5("Optional: Refit mixed model with adjustments"),
+                fluidRow(
+                  column(
+                    6,
+                    checkboxInput("lmer_refit_log_outcome", "Log-transform outcome (shifted log1p)", FALSE),
+                    checkboxInput("lmer_refit_use_week_spline", "Add spline for numeric week", FALSE),
+                    conditionalPanel(
+                      condition = "input.lmer_refit_use_week_spline",
+                      selectInput(
+                        "lmer_refit_spline_df",
+                        "Spline degrees of freedom",
+                        choices = c(3, 4, 5),
+                        selected = 3
+                      )
+                    ),
+                    checkboxInput("lmer_refit_include_tank_slope", "Include tank time slope (1 + time_wk_z | tank)", TRUE)
+                  ),
+                  column(
+                    6,
+                    checkboxInput("lmer_refit_include_batch", "Include experiment batch random intercept", TRUE),
+                    checkboxInput("lmer_refit_add_tissue_re", "Add tissue random intercept (1|tissue_type)", FALSE),
+                    checkboxInput("lmer_refit_add_fiber_re", "Add fiber random intercept (1|fiber_type)", FALSE),
+                    checkboxInput("lmer_refit_add_obs_re", "Add observation-level random effect", FALSE)
+                  )
+                ),
+                helpText("Select only the adjustments suggested by diagnostics, then refit to compare."),
+                actionButton("run_lmer_refit", "Refit Mixed Model", class = "btn-primary")
+              ),
+              h5("Refitted Mixed Model Summary"),
+              verbatimTextOutput("lmer_refit_summary"),
+              h5("Refitted Mixed Model Diagnostics"),
+              tabsetPanel(
+                id = "lmer_refit_diag_tabs",
+                tabPanel("DHARMa residuals", plotOutput("lmer_refit_dharma", height = "380px")),
+                tabPanel("Residuals vs Fitted", plotOutput("lmer_refit_resid_fitted", height = "360px")),
+                tabPanel("Random effects", plotOutput("lmer_refit_re", height = "380px")),
+                tabPanel("Fit Stats", DT::dataTableOutput("lmer_refit_fit_stats"))
               )
             )
           )
@@ -3718,6 +3759,169 @@ server <- function(input, output, session) {
       rownames = FALSE,
       escape = FALSE
     )
+  })
+  
+  # ============================================================================
+  # OPTIONAL LMER REFIT DRIVEN BY DIAGNOSTICS
+  # ============================================================================
+  
+  lmer_refit_model <- eventReactive(input$run_lmer_refit, {
+    base_fit <- lmer_model()
+    validate(need(inherits(base_fit, "lmerMod"), "Run Mixed Model first."))
+    
+    df <- lmer_data_cached()
+    validate(need(nrow(df) > 0, "No data available for refit."))
+    
+    full_form   <- stats::formula(base_fit) |> collapse_formula()
+    fixed_part  <- lme4::nobars(full_form) |> collapse_formula()
+    response_nm <- all.vars(update(fixed_part, . ~ 0))[1]
+    
+    adjust_notes <- character()
+    
+    # Ensure numeric week column for optional spline
+    df$week_numeric <- suppressWarnings(as.numeric(as.character(df$week)))
+    
+    if (!response_nm %in% names(df)) {
+      stop(sprintf("Column '%s' missing from refit data.", response_nm))
+    }
+    
+    if (isTRUE(input$lmer_refit_log_outcome)) {
+      y <- df[[response_nm]]
+      finite_y <- is.finite(y)
+      if (!any(finite_y)) {
+        showNotification("Log transform skipped: no finite outcome values.", type = "warning", duration = 6)
+      } else {
+        min_val <- min(y[finite_y], na.rm = TRUE)
+        shift <- if (is.finite(min_val) && min_val <= 0) abs(min_val) + 0.1 else 0
+        df[[response_nm]] <- log1p(y + shift)
+        adjust_notes <- c(adjust_notes, sprintf("Applied log1p transform with %.2f shift to keep values positive.", shift))
+      }
+    }
+    
+    # Optional spline for numeric week
+    if (isTRUE(input$lmer_refit_use_week_spline)) {
+      if (any(is.finite(df$week_numeric))) {
+        spline_df <- as.integer(input$lmer_refit_spline_df %||% 3)
+        fixed_part <- update(fixed_part, . ~ . + splines::ns(week_numeric, spline_df))
+        adjust_notes <- c(adjust_notes, sprintf("Added natural spline for week (df = %d).", spline_df))
+      } else {
+        showNotification("Spline skipped: numeric week is not available.", type = "warning", duration = 6)
+      }
+    }
+    
+    # Build random structure
+    random_terms <- character()
+    
+    add_random_term <- function(term, column = NULL, min_levels = 2, label = column) {
+      if (!is.null(column)) {
+        if (!column %in% names(df)) {
+          showNotification(sprintf("Random effect '%s' skipped: column missing.", label %||% column), type = "warning", duration = 6)
+          return(FALSE)
+        }
+        n_levels <- dplyr::n_distinct(stats::na.omit(df[[column]]))
+        if (n_levels < min_levels) {
+          showNotification(sprintf("Random effect '%s' skipped: needs >= %d levels.", label %||% column, min_levels), type = "warning", duration = 6)
+          return(FALSE)
+        }
+      }
+      random_terms <<- c(random_terms, term)
+      TRUE
+    }
+    
+    # Tank term always present
+    slope_ok <- isTRUE(input$lmer_refit_include_tank_slope) &&
+      ("time_wk_z" %in% names(df)) &&
+      isTRUE(stats::sd(df$time_wk_z, na.rm = TRUE) > 0)
+    
+    if (isTRUE(input$lmer_refit_include_tank_slope) && !slope_ok) {
+      showNotification("Tank slope requested but time_wk_z is missing/constant; using intercept only.", type = "message", duration = 6)
+    }
+    
+    tank_term <- if (slope_ok) "(1 + time_wk_z | tank)" else "(1 | tank)"
+    tank_added <- add_random_term(tank_term, "tank")
+    validate(need(isTRUE(tank_added), "Tank information is required for the refit."))
+    if (slope_ok) adjust_notes <- c(adjust_notes, "Included tank-specific week slope.")
+    
+    if (isTRUE(input$lmer_refit_include_batch)) {
+      added <- add_random_term("(1 | experiment_batch)", "experiment_batch")
+      if (added) adjust_notes <- c(adjust_notes, "Included experiment_batch random intercept.")
+    }
+    
+    if (isTRUE(input$lmer_refit_add_tissue_re)) {
+      added <- add_random_term("(1 | tissue_type)", "tissue_type")
+      if (added) adjust_notes <- c(adjust_notes, "Added tissue-level random intercept.")
+    }
+    
+    if (isTRUE(input$lmer_refit_add_fiber_re)) {
+      added <- add_random_term("(1 | fiber_type)", "fiber_type")
+      if (added) adjust_notes <- c(adjust_notes, "Added fiber-level random intercept.")
+    }
+    
+    if (isTRUE(input$lmer_refit_add_obs_re)) {
+      df$obs_refit_id <- factor(seq_len(nrow(df)))
+      random_terms <- c(random_terms, "(1 | obs_refit_id)")
+      adjust_notes <- c(adjust_notes, "Added observation-level random effect.")
+    }
+    
+    random_terms <- unique(random_terms)
+    validate(need(length(random_terms) > 0, "No random effects specified for refit."))
+    
+    fixed_chr <- paste(base::deparse(fixed_part), collapse = " ")
+    rand_chr  <- paste(random_terms, collapse = " + ")
+    final_form <- stats::as.formula(paste(fixed_chr, "+", rand_chr))
+    
+    fit_obj <- tryCatch(
+      lme4::lmer(final_form, data = df,
+                 control = lme4::lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 40000))
+      ),
+      error = function(e) {
+        showNotification(sprintf("Refit failed: %s", conditionMessage(e)), type = "error", duration = 8)
+        stop(e)
+      }
+    )
+    
+    list(model = fit_obj, formula = final_form, notes = adjust_notes)
+  })
+  
+  lmer_refit_diag <- reactive({
+    fit <- lmer_refit_model()
+    validate(need(!is.null(fit), "Select adjustments and refit the mixed model."))
+    build_lmer_diagnostics(fit$model, sims = 200L)
+  })
+  
+  output$lmer_refit_summary <- renderPrint({
+    fit <- lmer_refit_model()
+    validate(need(!is.null(fit), "Select adjustments and click 'Refit Mixed Model'."))
+    cat("Refit formula:\n", format(fit$formula), "\n\n")
+    if (length(fit$notes)) {
+      cat("Adjustments applied:\n")
+      cat(paste0("- ", fit$notes), sep = "\n")
+      cat("\n")
+    }
+    print(summary(fit$model))
+  })
+  
+  output$lmer_refit_dharma <- renderPlot({
+    diag_obj <- lmer_refit_diag()
+    validate(need(!is.null(diag_obj$sim), "DHARMa residuals unavailable for refit."))
+    graphics::plot(diag_obj$sim)
+  })
+  
+  output$lmer_refit_resid_fitted <- renderPlot({
+    lmer_refit_diag()$p_res_fit
+  })
+  
+  output$lmer_refit_re <- renderPlot({
+    lmer_refit_diag()$p_re
+  })
+  
+  output$lmer_refit_fit_stats <- DT::renderDataTable({
+    d <- lmer_refit_diag()
+    df <- d$stats
+    note_txt <- d$note %||% ""
+    cap <- if (nzchar(note_txt)) htmltools::tags$div(style = "color:#9a6700;", note_txt) else NULL
+    DT::datatable(df, options = list(dom = "t", pageLength = 10), rownames = FALSE, caption = cap) %>%
+      DT::formatRound("value", 6)
   })
   
   # ============================================================================
