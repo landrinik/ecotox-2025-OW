@@ -3939,6 +3939,29 @@ server <- function(input, output, session) {
   # ENHANCED EMMEANS WITH COLORED SIGNIFICANCE & DID ANALYSIS
   # ============================================================================
 
+  # Track when to recompute mixed-model EMMeans.  Users still trigger the first
+  # run via the "Calculate EM Means" button, but once they have done so we
+  # automatically kick off another run whenever a successful refit is available.
+  lmer_emmeans_trigger <- reactiveVal(NULL)
+  
+  observeEvent(input$lmer_run_emmeans, {
+    prev <- lmer_emmeans_trigger() %||% 0
+    lmer_emmeans_trigger(prev + 1)
+  })
+  
+  observeEvent(lmer_refit_model(), {
+    # Only auto-rerun if the user has already calculated EMMeans at least once
+    # (otherwise there is nothing to "redo").
+    if (!is.null(lmer_emmeans_trigger())) {
+      lmer_emmeans_trigger(lmer_emmeans_trigger() + 1)
+      showNotification(
+        "Mixed model refit detected — recalculating EMMeans using the refitted model.",
+        type = "message",
+        duration = 4
+      )
+    }
+  }, ignoreNULL = TRUE)
+  
   # EMMEANS calculation for regular regression
   emmeans_results <- eventReactive(input$run_emmeans, {
     tryCatch(
@@ -5390,7 +5413,7 @@ server <- function(input, output, session) {
   })
 
   # --- Mixed Effects: EMMeans calculation (safe spec + robust) ---
-  lmer_emmeans_results <- eventReactive(input$lmer_run_emmeans, {
+  lmer_emmeans_results <- eventReactive(lmer_emmeans_trigger(), {
     tryCatch(
       {
         # Require a fitted mixed model first (prefer refit when available)
@@ -5486,7 +5509,7 @@ server <- function(input, output, session) {
         list(error = e$message)
       }
     )
-  })
+  }, ignoreNULL = TRUE)
 
   # ---- Mixed effects emmeans table (DT) ----
   output$lmer_emmeans_table <- DT::renderDataTable({
@@ -5616,8 +5639,12 @@ server <- function(input, output, session) {
 
     # Build readable y-axis labels from available grouping columns
     group_cols <- intersect(c("chem_treatment", "fiber_type", "week", "dose_factor"), names(df))
-    if (length(group_cols) == 0L) group_cols <- "chem_treatment"
-    df$group_label <- do.call(paste, c(df[group_cols], sep = " | "))
+    if (length(group_cols) == 0L) {
+      # Intercept-only (or otherwise collapsed) emmeans results: synthesize a label
+      df$group_label <- paste0("Mean #", seq_len(nrow(df)))
+    } else {
+      df$group_label <- do.call(paste, c(df[group_cols], sep = " | "))
+    }
 
     # Draw point estimates and horizontal CIs (if available)
     p <- ggplot2::ggplot(df, ggplot2::aes(y = group_label, x = emmean)) +
