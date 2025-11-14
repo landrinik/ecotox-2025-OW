@@ -5444,9 +5444,18 @@ server <- function(input, output, session) {
         ))
         
         # Keep a handle to the data/params used for the fit so emmeans can rebuild
+        model_frame <- tryCatch(stats::model.frame(mdl), error = function(e) NULL)
         emm_data <- active_fit$data %||% attr(mdl, "data_used", exact = TRUE)
+        if (!is.null(emm_data) && !is.data.frame(emm_data)) emm_data <- NULL
         if (is.null(emm_data)) {
-          emm_data <- tryCatch(lme4::getME(mdl, "frame"), error = function(e) NULL)
+          # Prefer the actual model frame; fall back to lme4::getME if needed
+          emm_data <- model_frame %||% tryCatch(lme4::getME(mdl, "frame"), error = function(e) NULL)
+        } else if (!is.null(model_frame)) {
+          missing_cols <- setdiff(names(model_frame), names(emm_data))
+          if (length(missing_cols)) {
+            message(sprintf("[emmeans] cached data missing %s; using model frame instead", paste(missing_cols, collapse = ", ")))
+            emm_data <- model_frame
+          }
         }
         emm_params <- active_fit$params %||% attr(mdl, "emm_params", exact = TRUE)
         if (is.null(emm_params)) emm_params <- list()
@@ -5463,7 +5472,7 @@ server <- function(input, output, session) {
         requested <- as.character(input$lmer_emmeans_by %||% "treatment")
         emm_specs <- make_safe_emm_specs(requested, mdl)
         
-        mf_names <- names(stats::model.frame(mdl))
+        mf_names <- if (!is.null(model_frame)) names(model_frame) else names(stats::model.frame(mdl))
         can_use_at <- FALSE
         if (use_dose_as_factor && "dose_factor" %in% mf_names) {
           can_use_at <- TRUE
