@@ -1065,7 +1065,11 @@ ui <- fluidPage(
               # --- Mixed Effects: Model settings (remove the duplicate random-intercepts here) ---
               wellPanel(
                 h5("Model Settings"),
-                checkboxInput("lmer_include_three_way", "Include 3‑way: fiber × treatment × week", value = TRUE),
+                checkboxInput(
+                  "lmer_include_three_way",
+                  "Include week interactions (week × fiber / treatment / dose)",
+                  value = TRUE
+                ),
                 checkboxInput("lmer_dose_by_fiber", "Include dose × fiber_type", value = FALSE),
                 checkboxInput("lmer_dose_by_treat", "Include dose × chem_treatment", value = FALSE),
                 checkboxInput("lmer_dose_as_factor", "Treat dose as a factor", value = FALSE),
@@ -3320,10 +3324,11 @@ server <- function(input, output, session) {
       if (include_week)  "week"
     )
     if (include_fiber && include_trt)  rhs_terms <- c(rhs_terms, "fiber_type:chem_treatment")
-    if (include_week && include_fiber) rhs_terms <- c(rhs_terms, "fiber_type:week")
-    if (include_week && include_trt)   rhs_terms <- c(rhs_terms, "chem_treatment:week")
-    if (isTRUE(input$lmer_include_three_way) && include_fiber && include_trt && include_week) {
-      rhs_terms <- c(rhs_terms, "fiber_type:chem_treatment:week")
+    if (include_week && isTRUE(input$lmer_include_three_way)) {
+      if (include_fiber) rhs_terms <- c(rhs_terms, "fiber_type:week")
+      if (include_trt)   rhs_terms <- c(rhs_terms, "chem_treatment:week")
+      week_dose_term <- if (use_dose_as_factor) "dose_factor:week" else "dose_log10:week"
+      rhs_terms <- c(rhs_terms, week_dose_term)
     }
     if (!use_dose_as_factor && isTRUE(input$lmer_dose_by_fiber) && include_fiber) {
       rhs_terms <- c(rhs_terms, "dose_log10:fiber_type")
