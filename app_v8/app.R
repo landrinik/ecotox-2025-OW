@@ -1135,6 +1135,10 @@ ui <- fluidPage(
                 tabPanel(
                   "Fit Stats",
                   DT::dataTableOutput("lmer_fit_stats")
+                ),
+                tabPanel(
+                  "Refit suggestions",
+                  DT::dataTableOutput("lmer_refit_table")
                 )
               
               )
@@ -3517,6 +3521,162 @@ server <- function(input, output, session) {
     list(sim = sim_res, p_res_fit = p_res_fit, p_re = p_re, stats = stats_df, note = note, varcomps = vc_df)
   }
   
+  summarize_variance_by_group <- function(df, group_var) {
+    if (!group_var %in% names(df)) {
+      return(NULL)
+    }
+    df %>%
+      dplyr::filter(!is.na(.data[[group_var]])) %>%
+      dplyr::group_by(.data[[group_var]]) %>%
+      dplyr::summarise(
+        n = dplyr::n(),
+        sd = stats::sd(outcome, na.rm = TRUE),
+        mean_val = mean(outcome, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::filter(is.finite(sd) & n >= 3)
+  }
+  
+  build_refit_suggestions <- function(model, diag_obj, data) {
+    suggestions <- list()
+    add_suggestion <- function(issue, evidence, recommendation, formula_hint) {
+      suggestions[[length(suggestions) + 1L]] <<- data.frame(
+        issue = issue,
+        evidence = evidence,
+        recommended_adjustment = recommendation,
+        formula_hint = formula_hint,
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    sim <- diag_obj$sim
+    if (!is.null(sim)) {
+      ks <- tryCatch(DHARMa::testUniformity(sim), error = function(e) NULL)
+      disp <- tryCatch(DHARMa::testDispersion(sim), error = function(e) NULL)
+      zi <- tryCatch(DHARMa::testZeroInflation(sim), error = function(e) NULL)
+      
+      if (!is.null(ks) && is.finite(ks$p.value) && ks$p.value < 0.05) {
+        add_suggestion(
+          "Non-uniform DHARMa residuals",
+          sprintf("KS test p = %.3f indicates heavy skew / tail behavior.", ks$p.value),
+          "Stabilize the outcome via log1p or square-root transforms, or refit with a Gamma GLMM for strictly positive endpoints.",
+          "Example: lmer(log1p(outcome - min(outcome, na.rm = TRUE) + 0.1) ~ ... + (1|tank))"
+        )
+      }
+      
+      if (!is.null(disp) && is.finite(disp$p.value) && disp$p.value < 0.05) {
+        add_suggestion(
+          "Dispersion mismatch",
+          sprintf("DHARMa dispersion test p = %.3f; residual spread changes with fitted means.", disp$p.value),
+          "Allow tank-specific time slopes or add an observation-level random effect to capture extra-Poisson variability.",
+          "Example: outcome ~ ... + (1 + time_wk_z | tank) or outcome ~ ... + (1|tank) + (1|obs_id)"
+        )
+      }
+      
+      if (!is.null(zi) && is.finite(zi$p.value) && zi$p.value < 0.05) {
+        add_suggestion(
+          "Potential zero inflation",
+          sprintf("DHARMa zero-inflation test p = %.3f; more zeros than expected under Gaussian errors.", zi$p.value),
+          "Switch to a zero-inflated model (e.g., glmmTMB with ziformula = ~1) or model the probability of observing a detection separately.",
+          "Example: glmmTMB(outcome ~ ... + (1|tank), ziformula = ~1)"
+        )
+      }
+    }
+    
+    df_rf <- data.frame(
+      fitted = as.numeric(stats::fitted(model)),
+      resid  = as.numeric(stats::residuals(model, type = "pearson"))
+    )
+    if (nrow(df_rf) >= 10 && stats::sd(df_rf$resid, na.rm = TRUE) > 0) {
+      lin_fit <- stats::lm(resid ~ fitted, data = df_rf)
+      sse_lin <- sum(stats::residuals(lin_fit)^2, na.rm = TRUE)
+      loess_fit <- tryCatch(stats::loess(resid ~ fitted, data = df_rf, span = 0.75), error = function(e) NULL)
+      if (!is.null(loess_fit)) {
+        loess_pred <- stats::predict(loess_fit, df_rf$fitted)
+        sse_loess <- sum((df_rf$resid - loess_pred)^2, na.rm = TRUE)
+        if (is.finite(sse_lin) && is.finite(sse_loess) && sse_loess < 0.9 * sse_lin) {
+          reduction <- (1 - sse_loess / sse_lin) * 100
+          add_suggestion(
+            "Curvature in residuals vs fitted",
+            sprintf("LOESS smooth reduced residual SSE by %.1f%% relative to a linear trend.", reduction),
+            "Let time trends flex by adding splines for week or random slopes for tank-by-week.",
+            "Example: outcome ~ ... + splines::ns(as.numeric(week), df = 3) + (1 + time_wk_z | tank)"
+          )
+        }
+      }
+    }
+    
+    tissue_var <- summarize_variance_by_group(data, "tissue_type")
+    fiber_var  <- summarize_variance_by_group(data, "fiber_type")
+    if (!is.null(tissue_var) && nrow(tissue_var) >= 2) {
+      ratio <- max(tissue_var$sd) / max(min(tissue_var$sd), 1e-8)
+      if (is.finite(ratio) && ratio >= 1.5) {
+        dominant <- tissue_var[which.max(tissue_var$sd), ]
+        ref <- tissue_var[which.min(tissue_var$sd), ]
+        dom_name <- as.character(dominant[["tissue_type"]])
+        ref_name <- as.character(ref[["tissue_type"]])
+        add_suggestion(
+          "Tissue-specific heteroskedasticity",
+          sprintf(
+            "SD differs by %.1fx (e.g., %s sd=%.2f vs %s sd=%.2f).",
+            ratio,
+            dom_name, dominant$sd,
+            ref_name, ref$sd
+          ),
+          "Give each tissue its own variance via weights or random intercepts (e.g., add (1|tissue_type) or nlme::varIdent).",
+          "Example: outcome ~ ... + (1|tank) + (1|tissue_type)"
+        )
+      }
+    } else if (!is.null(fiber_var) && nrow(fiber_var) >= 2) {
+      ratio <- max(fiber_var$sd) / max(min(fiber_var$sd), 1e-8)
+      if (is.finite(ratio) && ratio >= 1.5) {
+        dominant <- fiber_var[which.max(fiber_var$sd), ]
+        ref <- fiber_var[which.min(fiber_var$sd), ]
+        dom_name <- as.character(dominant[["fiber_type"]])
+        ref_name <- as.character(ref[["fiber_type"]])
+        add_suggestion(
+          "Fiber-specific heteroskedasticity",
+          sprintf(
+            "SD differs by %.1fx across fibers (%s sd=%.2f vs %s sd=%.2f).",
+            ratio, dom_name, dominant$sd, ref_name, ref$sd
+          ),
+          "Add fiber-level random intercepts or allow separate residual variance blocks.",
+          "Example: outcome ~ ... + (1|tank) + (1|fiber_type)"
+        )
+      }
+    }
+    
+    if ("fiber_type" %in% names(data) && "tissue_type" %in% names(data)) {
+      cotton_gills <- data %>%
+        dplyr::filter(fiber_type == "cotton", tissue_type == "gills")
+      if (nrow(cotton_gills) >= 5) {
+        cotton_sd <- stats::sd(cotton_gills$outcome, na.rm = TRUE)
+        cotton_mean <- mean(cotton_gills$outcome, na.rm = TRUE)
+        add_suggestion(
+          "Cotton gills variability",
+          sprintf(
+            "Cotton gills subset (n=%d) mean=%.2f, sd=%.2f; large spread relative to other tissues drives DHARMa deviations.",
+            nrow(cotton_gills), cotton_mean, cotton_sd
+          ),
+          "Model cotton gills separately (interaction terms) or add tissue-specific variance weights.",
+          "Example: outcome ~ fiber_type * tissue_type * week + (1|tank)"
+        )
+      }
+    }
+    
+    if (length(suggestions) == 0) {
+      data.frame(
+        issue = "No major issues detected",
+        evidence = "DHARMa tests and residual heuristics did not flag problems.",
+        recommended_adjustment = "Current specification appears adequate.",
+        formula_hint = "--",
+        stringsAsFactors = FALSE
+      )
+    } else {
+      dplyr::bind_rows(suggestions)
+    }
+  }
+  
   # ---- Mixed effects diagnostics (renderers; UI IDs unchanged) ----
   lmer_diag <- reactive({
     fit <- lmer_model()
@@ -3540,6 +3700,24 @@ server <- function(input, output, session) {
     cap <- if (nzchar(d$note)) htmltools::tags$div(style = "color:#9a6700;", d$note) else NULL
     DT::datatable(df, options = list(dom = "t", pageLength = 10), rownames = FALSE, caption = cap) %>%
       DT::formatRound("value", 6)
+  })
+  
+  lmer_refit_table_data <- reactive({
+    fit <- lmer_model()
+    validate(need(inherits(fit, "lmerMod"), "Run Mixed Model first."))
+    diag_obj <- lmer_diag()
+    df <- lmer_data_cached()
+    build_refit_suggestions(fit, diag_obj, df)
+  })
+  
+  output$lmer_refit_table <- DT::renderDataTable({
+    df <- lmer_refit_table_data()
+    DT::datatable(
+      df,
+      options = list(dom = "t", pageLength = 8, scrollX = TRUE),
+      rownames = FALSE,
+      escape = FALSE
+    )
   })
   
   # ============================================================================
