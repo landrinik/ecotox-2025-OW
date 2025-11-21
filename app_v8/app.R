@@ -1115,7 +1115,7 @@ ui <- fluidPage(
             mainPanel(
               width = 8,
               h5("Mixed Model Summary"), verbatimTextOutput("lmer_model_summary"),
-              h5("ANOVA Table"), DT::dataTableOutput("lmer_anova"),
+              h5("ANOVA Table"), gt::gt_output("lmer_anova"),
               h5("Estimated Marginal Means"), plotOutput("lmer_emmeans_plot", height = "420px"),
               DT::dataTableOutput("lmer_emmeans_table"),
               h5("Pairwise / Custom Contrasts"), DT::dataTableOutput("lmer_pairwise_table"),
@@ -2321,7 +2321,7 @@ server <- function(input, output, session) {
     }
     is_current
   }
-
+  
   # Standardize CI column names across emmeans versions/types
   standardize_emm_columns <- function(df) {
     if ("asymp.LCL" %in% names(df) && !"lower.CL" %in% names(df)) {
@@ -2331,6 +2331,53 @@ server <- function(input, output, session) {
       df <- dplyr::rename(df, upper.CL = asymp.UCL)
     }
     df
+  }
+  
+  # Apply the inverse of any response transformation used during refitting so
+  # emmeans are displayed on the original scale (e.g., undo log1p+shift).
+  back_transform_emm_df <- function(df, transform_info) {
+    if (!is.data.frame(df) || is.null(transform_info)) {
+      return(list(data = df, note = NULL))
+    }
+    
+    type <- transform_info$type %||% ""
+    if (!nzchar(type)) {
+      return(list(data = df, note = NULL))
+    }
+    
+    if (identical(type, "shifted_log1p")) {
+      shift <- transform_info$shift %||% 0
+      inv_fun <- function(x) {
+        vals <- suppressWarnings(as.numeric(x))
+        out <- rep(NA_real_, length(vals))
+        ok <- is.finite(vals)
+        out[ok] <- exp(vals[ok]) - 1 - shift
+        out
+      }
+      
+      original_mean <- if ("emmean" %in% names(df)) df$emmean else NULL
+      if (!is.null(original_mean)) {
+        df$emmean <- inv_fun(df$emmean)
+      }
+      if ("SE" %in% names(df) && !is.null(original_mean)) {
+        eta <- suppressWarnings(as.numeric(original_mean))
+        df$SE <- suppressWarnings(as.numeric(df$SE)) * exp(eta)
+      }
+      if ("lower.CL" %in% names(df)) {
+        df$lower.CL <- inv_fun(df$lower.CL)
+      }
+      if ("upper.CL" %in% names(df)) {
+        df$upper.CL <- inv_fun(df$upper.CL)
+      }
+      
+      note <- sprintf(
+        "Means back-transformed from log1p scale (shift = %.2f).",
+        shift
+      )
+      return(list(data = df, note = note))
+    }
+    
+    list(data = df, note = NULL)
   }
 
   # Build 'at=' list consistent with the model’s dose encoding
@@ -3787,6 +3834,7 @@ server <- function(input, output, session) {
     
     adjust_notes <- character()
     emm_params <- list()
+    outcome_transform <- NULL
     
     # Ensure numeric week column for optional spline
     df$week_numeric <- suppressWarnings(as.numeric(as.character(df$week)))
@@ -3805,6 +3853,11 @@ server <- function(input, output, session) {
         shift <- if (is.finite(min_val) && min_val <= 0) abs(min_val) + 0.1 else 0
         df[[response_nm]] <- log1p(y + shift)
         adjust_notes <- c(adjust_notes, sprintf("Applied log1p transform with %.2f shift to keep values positive.", shift))
+        outcome_transform <- list(
+          type = "shifted_log1p",
+          shift = shift,
+          response = response_nm
+        )
       }
     }
     
@@ -3892,6 +3945,7 @@ server <- function(input, output, session) {
     )
     
     attr(fit_obj, "data_used") <- df
+    emm_params$outcome_transform <- outcome_transform
     attr(fit_obj, "emm_params") <- emm_params
     
     list(model = fit_obj, formula = final_form, notes = adjust_notes, data = df, params = emm_params)
@@ -3940,21 +3994,27 @@ server <- function(input, output, session) {
   
   # Helper reactive: prefer refit model (if available) for downstream EMMeans/contrasts
   active_lmer_model <- reactive({
+    # 1. Try to get the refit object
     refit_obj <- tryCatch(lmer_refit_model(), error = function(e) NULL)
+    
+    # 2. If refit exists and is a valid lmerMod, use it
     if (is.list(refit_obj) && inherits(refit_obj$model, "lmerMod")) {
       return(list(
-        model = refit_obj$model,
+        model  = refit_obj$model,
         source = "refit",
-        data = refit_obj$data,
-        params = refit_obj$params
+        data   = refit_obj$data,   # This must be the refit data!
+        params = refit_obj$params  # This must include spline_df!
       ))
     }
     
+    # 3. Otherwise, fall back to the base model
     base_fit <- tryCatch(lmer_model(), error = function(e) NULL)
+    validate(need(!is.null(base_fit), "No base model found."))
+    
     list(
-      model = base_fit,
+      model  = base_fit,
       source = "base",
-      data = attr(base_fit, "data_used", exact = TRUE),
+      data   = attr(base_fit, "data_used", exact = TRUE),
       params = attr(base_fit, "emm_params", exact = TRUE)
     )
   })
@@ -3974,15 +4034,12 @@ server <- function(input, output, session) {
   })
   
   observeEvent(lmer_refit_model(), {
-    # Only auto-rerun if the user has already calculated EMMeans at least once
-    # (otherwise there is nothing to "redo").
-    if (!is.null(lmer_emmeans_trigger())) {
+    req(lmer_refit_model())
+    # Only trigger if the user has already run EMMeans once (to avoid auto-running on app start)
+    # or if you want it to always run after refit, remove the check.
+    if (!is.null(lmer_emmeans_trigger())) { 
       lmer_emmeans_trigger(lmer_emmeans_trigger() + 1)
-      showNotification(
-        "Mixed model refit detected — recalculating EMMeans using the refitted model.",
-        type = "message",
-        duration = 4
-      )
+      showNotification("Refit successful. Updating EMMeans and plots...", type = "message")
     }
   }, ignoreNULL = TRUE)
   
@@ -5436,129 +5493,77 @@ server <- function(input, output, session) {
     }
   })
 
-  # --- Mixed Effects: EMMeans calculation (safe spec + robust) ---
+  # --- Mixed Effects: EMMeans calculation (safe spec + robust for refits) ---
   lmer_emmeans_results <- eventReactive(lmer_emmeans_trigger(), {
-    tryCatch(
-      {
-        # Require a fitted mixed model first (prefer refit when available)
-        active_fit <- active_lmer_model()
-        mdl <- active_fit$model
-        validate(need(
-          !is.null(mdl) && inherits(mdl, "lmerMod"),
-          "Run the mixed effects model first"
-        ))
-        
-        # Keep a handle to the data/params used for the fit so emmeans can rebuild
-        model_frame <- tryCatch(stats::model.frame(mdl), error = function(e) NULL)
-        emm_data <- active_fit$data %||% attr(mdl, "data_used", exact = TRUE)
-        if (!is.null(emm_data) && !is.data.frame(emm_data)) emm_data <- NULL
-        if (is.null(emm_data)) {
-          # Prefer the actual model frame; fall back to lme4::getME if needed
-          emm_data <- model_frame %||% tryCatch(lme4::getME(mdl, "frame"), error = function(e) NULL)
-        } else if (!is.null(model_frame)) {
-          missing_cols <- setdiff(names(model_frame), names(emm_data))
-          if (length(missing_cols)) {
-            message(sprintf("[emmeans] cached data missing %s; using model frame instead", paste(missing_cols, collapse = ", ")))
-            emm_data <- model_frame
-          }
-        }
-        emm_params <- active_fit$params %||% attr(mdl, "emm_params", exact = TRUE)
-        if (is.null(emm_params)) emm_params <- list()
-        
-        
-        message(sprintf("[emmeans] using %s mixed model", active_fit$source))
-
-        # Match the model's dose encoding and build 'at='
-        use_dose_as_factor <- isTRUE(input$lmer_dose_as_factor)
-        dose_choice <- as.character(input$lmer_emmeans_dose %||% "0")
-        at_list <- build_emm_at_list(dose_choice, use_dose_as_factor)
-
-        # Build a spec that only uses variables present in the model
-        requested <- as.character(input$lmer_emmeans_by %||% "treatment")
-        emm_specs <- make_safe_emm_specs(requested, mdl)
-        
-        mf_names <- if (!is.null(model_frame)) names(model_frame) else names(stats::model.frame(mdl))
-        can_use_at <- FALSE
-        if (use_dose_as_factor && "dose_factor" %in% mf_names) {
-          can_use_at <- TRUE
-        } else if (!use_dose_as_factor && all(c("dose_log10", "is_control") %in% mf_names)) {
-          can_use_at <- TRUE
-        }
-        
-        run_emm <- function(specs = emm_specs, with_at = FALSE) {
-          args <- list(object = mdl, specs = specs)
-          if (with_at && length(at_list)) args$at <- at_list
-          if (!is.null(emm_data)) args$data <- emm_data
-          if (length(emm_params)) args$params <- emm_params
-          do.call(emmeans::emmeans, args)
-        }
-
-        # If the spec reduced to ~1 (nothing estimable), fall back to treatment if available
-        if (identical(format(emm_specs), "~1")) {
-          if ("chem_treatment" %in% mf_names) emm_specs <- ~chem_treatment
-        }
-
-        # Try full emmeans with 'at' when appropriate
-        emm <- tryCatch(
-          {
-            run_emm(with_at = can_use_at)
-          },
-          error = function(e1) {
-            message("Primary emmeans failed, retrying without 'at=': ", e1$message)
-            tryCatch(
-              {
-                run_emm(with_at = FALSE)
-              },
-              error = function(e2) {
-                message("Fallback emmeans failed, using simplest spec: ", e2$message)
-                # Final fallback: single available factor, or stop
-                if ("chem_treatment" %in% mf_names) {
-                  run_emm(specs = ~chem_treatment)
-                } else if ("week" %in% mf_names) {
-                  run_emm(specs = ~week)
-                } else {
-                  stop("No suitable factor is available in the model for EMMeans.")
-                }
-              }
-            )
-          }
-        )
-
-        # Summarize via S3 method (do not namespace), then standardize CI names
-        emm_tbl <- as.data.frame(summary(emm, infer = TRUE))
-        emm_tbl <- standardize_emm_columns(emm_tbl)
-
-        # Numeric cleanup for safety
-        num_cols <- intersect(c("emmean", "SE", "df", "lower.CL", "upper.CL"), names(emm_tbl))
-        emm_tbl[num_cols] <- lapply(emm_tbl[num_cols], function(x) suppressWarnings(as.numeric(x)))
-
-        # Plot data: keep finite rows
-        emm_plot <- dplyr::filter(
-          emm_tbl,
-          is.finite(emmean),
-          (!"lower.CL" %in% names(emm_tbl)) | is.finite(lower.CL),
-          (!"upper.CL" %in% names(emm_tbl)) | is.finite(upper.CL)
-        )
-
-        # Log the spec actually used
-        req_txt <- paste(deparse(emm_specs), collapse = " ")
-        message("[emmeans] specs used: ", req_txt)
-
-        list(
-          emmeans = emm,
-          emmeans_df = emm_tbl,
-          emmeans_plot = emm_plot,
-          specification_used = req_txt,
-          model_source = active_fit$source
-        )
-      },
-      error = function(e) {
-        # IMPORTANT: error handler must be inside this same tryCatch(...) call
-        message("EMMeans failed: ", e$message)
-        list(error = e$message)
+    tryCatch({
+      # 1. Get the active model (base or refit)
+      active_fit <- active_lmer_model()
+      mdl <- active_fit$model
+      validate(need(!is.null(mdl), "No model available"))
+      
+      # 2. Get the CORRECT data and params
+      #    Refits often add columns (week_numeric) or params (spline_df)
+      #    that are NOT in the original data.
+      emm_data <- active_fit$data 
+      emm_params <- active_fit$params
+      transform_info <- emm_params$outcome_transform %||% NULL
+      
+      # Fallback: if data is missing on the object, try to recover from model frame
+      if (is.null(emm_data)) {
+        emm_data <- tryCatch(stats::model.frame(mdl), error = function(e) NULL)
       }
-    )
-  }, ignoreNULL = TRUE)
+      
+      # 3. Setup arguments for emmeans
+      #    Use 'at' list logic (same as before)
+      dose_choice <- as.character(input$lmer_emmeans_dose %||% "0")
+      use_dose_as_factor <- isTRUE(input$lmer_dose_as_factor)
+      at_list <- build_emm_at_list(dose_choice, use_dose_as_factor)
+      
+      #    Build the spec formula
+      requested <- as.character(input$lmer_emmeans_by %||% "treatment")
+      emm_specs <- make_safe_emm_specs(requested, mdl)
+      
+      # 4. Call emmeans
+      #    Crucially, pass 'data' and 'params' explicitly!
+      args <- list(object = mdl, specs = emm_specs)
+      
+      # Only pass 'at' if the vars exist in the model/data
+      mf_names <- names(emm_data)
+      can_use_at <- (use_dose_as_factor && "dose_factor" %in% mf_names) ||
+        (!use_dose_as_factor && all(c("dose_log10", "is_control") %in% mf_names))
+      
+      if (can_use_at) args$at <- at_list
+      
+      # Explicitly pass the data and params from the active fit
+      if (!is.null(emm_data)) args$data <- emm_data
+      if (!is.null(emm_params) && length(emm_params) > 0) args$params <- emm_params
+      
+      # Run emmeans
+      emm <- do.call(emmeans::emmeans, args)
+      
+      # 5. Process results (summary, plot data)
+      emm_tbl <- as.data.frame(summary(emm, infer = TRUE))
+      emm_tbl <- standardize_emm_columns(emm_tbl) # Your helper
+      bt <- back_transform_emm_df(emm_tbl, transform_info)
+      emm_tbl <- bt$data
+      transform_note <- bt$note
+      
+      # Create a clean plot dataframe (filtering out non-finite CIs)
+      emm_plot_df <- dplyr::filter(emm_tbl, is.finite(emmean))
+      
+      list(
+        emmeans = emm,
+        emmeans_df = emm_tbl,
+        emmeans_plot_df = emm_plot_df,
+        model_source = active_fit$source,
+        transform_note = transform_note,
+        transform_info = transform_info
+      )
+      
+    }, error = function(e) {
+      list(error = e$message)
+    })
+  })
 
   # ---- Mixed effects emmeans table (DT) ----
   output$lmer_emmeans_table <- DT::renderDataTable({
@@ -5572,12 +5577,21 @@ server <- function(input, output, session) {
     upper_col <- if ("upper.CL" %in% names(df_emm)) "upper.CL" else NULL
     round_cols <- c("emmean", "SE", lower_col, upper_col)
     round_cols <- round_cols[round_cols %in% names(df_emm)]
+    
+    caption_tag <- NULL
+    if (!is.null(results$transform_note)) {
+      caption_tag <- htmltools::tags$caption(
+        style = "caption-side: top; text-align: left;",
+        results$transform_note
+      )
+    }
 
     DT::datatable(
       df_emm,
       options = list(pageLength = 10, scrollX = TRUE),
       filter = "top",
-      rownames = FALSE
+      rownames = FALSE,
+      caption = caption_tag
     ) %>%
       (function(dtbl) {
         if (length(round_cols)) DT::formatRound(dtbl, columns = round_cols, digits = 4) else dtbl
@@ -5643,12 +5657,22 @@ server <- function(input, output, session) {
         ),
         Adjustment = adj_method
       )
+    
+    caption_tag <- NULL
+    emm_note <- tryCatch(lmer_emmeans_results()$transform_note, error = function(e) NULL)
+    if (!is.null(emm_note)) {
+      caption_tag <- htmltools::tags$caption(
+        style = "caption-side: top; text-align: left;",
+        emm_note
+      )
+    }
 
     dt <- DT::datatable(
       dfp,
       options = list(pageLength = 15, scrollX = TRUE),
       filter = "top",
-      rownames = FALSE
+      rownames = FALSE,
+      caption = caption_tag
     ) %>%
       DT::formatStyle(
         "Significant",
@@ -5681,11 +5705,11 @@ server <- function(input, output, session) {
     results <- lmer_emmeans_results()
     validate(need(!is.null(results$emmeans_df), "Calculate EM Means for mixed effects first"))
     validate(need(is.null(results$error), paste("Emmeans error:", results$error)))
-
+    
     # Use pre-filtered, standardized data prepared by lmer_emmeans_results()
-    df <- results$emmeans_plot
+    df <- results$emmeans_plot_df
     validate(need(nrow(df) > 0, "No finite EMMeans rows to plot."))
-
+    
     # Build readable y-axis labels from available grouping columns
     group_cols <- intersect(c("chem_treatment", "fiber_type", "week", "dose_factor"), names(df))
     if (length(group_cols) == 0L) {
@@ -5694,17 +5718,22 @@ server <- function(input, output, session) {
     } else {
       df$group_label <- do.call(paste, c(df[group_cols], sep = " | "))
     }
-
+    
     # Draw point estimates and horizontal CIs (if available)
+    labs_args <- list(
+      title = "Mixed Effects Estimated Marginal Means with 95% CI",
+      x = "Estimated marginal mean",
+      y = paste(group_cols, collapse = " | ")
+    )
+    if (!is.null(results$transform_note)) {
+      labs_args$subtitle <- results$transform_note
+    }
+    
     p <- ggplot2::ggplot(df, ggplot2::aes(y = group_label, x = emmean)) +
       ggplot2::geom_point(size = 2.5, color = "#2c3e50") +
-      ggplot2::labs(
-        title = "Mixed Effects Estimated Marginal Means with 95% CI",
-        x = "Estimated marginal mean",
-        y = paste(group_cols, collapse = " | ")
-      ) +
+      do.call(ggplot2::labs, labs_args) +
       ggplot2::theme_bw()
-
+    
     # Add CIs only when both bounds are present
     if (all(c("lower.CL", "upper.CL") %in% names(df))) {
       p <- p + ggplot2::geom_errorbar(
@@ -5712,7 +5741,7 @@ server <- function(input, output, session) {
         width = 0.15, orientation = "y", color = "#3498db"
       )
     }
-
+    
     p
   })
 
@@ -5974,42 +6003,89 @@ server <- function(input, output, session) {
   })
 
   # ---- Mixed effects ANOVA (robust DT) ----
-  output$lmer_anova <- DT::renderDataTable({
-    fit <- lmer_model()
-    validate(need(inherits(fit, "lmerMod"), "Fit the mixed model first."))
+  output$lmer_anova <- gt::render_gt({
+    # 1. Retrieve the active model (base or refit)
+    fit_list <- active_lmer_model()
     
-    # Type-III Wald Chi-square ANOVA for merMod
-    a3 <- car::Anova(fit, type = 3)
-    a3 <- as.data.frame(a3)
-    a3 <- tibble::rownames_to_column(a3, "term")
+    # 2. Validate that a model exists
+    validate(
+      need(!is.null(fit_list) && !is.null(fit_list$model), "No model fitted yet.")
+    )
     
-    # Normalize potential column name differences across car versions
-    names(a3) <- sub("^Pr\\(>Chisq\\)$", "PrChisq", names(a3))
-    df_col  <- intersect(c("Df", "df"), names(a3))[1]
-    chi_col <- intersect(c("Chisq", "LR Chisq", "Wald", "Wald Chisq"), names(a3))[1]
+    model <- fit_list$model
     
-    # Drop rows with non-positive df or non-finite test statistic (prevents blank rows)
-    if (!is.null(df_col) && !is.null(chi_col)) {
-      a3 <- a3 %>%
-        dplyr::filter((!!rlang::sym(df_col)) > 0, is.finite((!!rlang::sym(chi_col))))
+    # 3. Calculate Type III ANOVA with Wald chi-square tests
+    #    Wrap in tryCatch to handle potential convergence or rank-deficiency issues
+    anova_res <- tryCatch({
+      if (inherits(model, "merMod")) {
+        car::Anova(model, type = 3)
+      } else {
+        # Fallback for standard lm/glm objects if ever used
+        car::Anova(model, type = 3, test.statistic = "F")
+      }
+    }, error = function(e) {
+      # Fallback to standard anova if car::Anova fails
+      # (e.g. singular fit or specific rank issues)
+      anova(model)
+    })
+    
+    # 4. Convert to data frame for gt
+    anova_df <- as.data.frame(anova_res)
+    
+    # Move row names (Terms) to a proper column
+    anova_df$Term <- rownames(anova_df)
+    
+    # Reorder to put 'Term' first
+    if ("Term" %in% names(anova_df)) {
+      anova_df <- anova_df[, c("Term", setdiff(names(anova_df), "Term"))]
     }
     
-    # Render with formatting
-    DT::datatable(
-      a3,
-      options = list(pageLength = 10, scrollX = TRUE),
-      filter  = "top",
-      rownames = FALSE
-    ) %>%
-      (function(dtbl) {
-        cols_to_round <- c(chi_col, "PrChisq")
-        cols_to_round <- cols_to_round[cols_to_round %in% names(a3)]
-        if (length(cols_to_round)) {
-          DT::formatRound(dtbl, columns = cols_to_round, digits = 4)
-        } else {
-          dtbl
-        }
-      })
+    # 5. Clean up column names to be more readable
+    #    Common car::Anova cols: "Chisq", "Df", "Pr(>Chisq)"
+    colnames(anova_df) <- gsub("Pr\\(>Chisq\\)", "P_Value", colnames(anova_df))
+    colnames(anova_df) <- gsub("Chisq", "Chi_Square", colnames(anova_df))
+    colnames(anova_df) <- gsub("Pr\\(>F\\)", "P_Value", colnames(anova_df)) # For F-tests
+    
+    # 6. Create and format the gt table
+    gt::gt(anova_df) %>%
+      # Format numeric columns (Chi-Square, F values) to 3 decimals
+      gt::fmt_number(
+        columns = where(is.numeric),
+        decimals = 3
+      ) %>%
+      # Format P-values to 4 decimals
+      gt::fmt_number(
+        columns = matches("P_Value"),
+        decimals = 4
+      ) %>%
+      # Bold significant p-values (< 0.05)
+      gt::tab_style(
+        style = gt::cell_text(weight = "bold"),
+        locations = gt::cells_body(
+          columns = matches("P_Value"),
+          rows = if ("P_Value" %in% names(anova_df)) P_Value < 0.05 else FALSE
+        )
+      ) %>%
+      # Add a header
+      gt::tab_header(
+        title = "Analysis of Variance (Type III Wald Tests)",
+        subtitle = "Significance of Fixed Effects"
+      ) %>%
+      # Rename columns for display
+      gt::cols_label(
+        Term = "Fixed Effect Term",
+        Chi_Square = "Chi-Square",
+        Df = "DF",
+        P_Value = "P-Value"
+      ) %>%
+      # Interactive options for better viewing
+      gt::opt_interactive(
+        use_search = FALSE,
+        use_filters = FALSE,
+        use_resizers = TRUE,
+        use_highlight = TRUE,
+        use_compact_mode = TRUE
+      )
   })
 
   # Model comparison output
