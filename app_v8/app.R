@@ -5494,6 +5494,7 @@ server <- function(input, output, session) {
   })
 
   # --- Mixed Effects: EMMeans calculation (safe spec + robust for refits) ---
+  # --- Mixed Effects: EMMeans calculation (Safe spec + Robust for Refits) ---
   lmer_emmeans_results <- eventReactive(lmer_emmeans_trigger(), {
     tryCatch({
       # 1. Get the active model (base or refit)
@@ -5501,63 +5502,84 @@ server <- function(input, output, session) {
       mdl <- active_fit$model
       validate(need(!is.null(mdl), "No model available"))
       
-      # 2. Get the CORRECT data and params
-      #    Refits often add columns (week_numeric) or params (spline_df)
-      #    that are NOT in the original data.
+      # 2. Get the CORRECT data and params from the active fit object
       emm_data <- active_fit$data 
       emm_params <- active_fit$params
-      transform_info <- emm_params$outcome_transform %||% NULL
       
-      # Fallback: if data is missing on the object, try to recover from model frame
+      # Fallback: try to recover data from model frame if missing
       if (is.null(emm_data)) {
         emm_data <- tryCatch(stats::model.frame(mdl), error = function(e) NULL)
       }
       
-      # 3. Setup arguments for emmeans
-      #    Use 'at' list logic (same as before)
-      dose_choice <- as.character(input$lmer_emmeans_dose %||% "0")
-      use_dose_as_factor <- isTRUE(input$lmer_dose_as_factor)
-      at_list <- build_emm_at_list(dose_choice, use_dose_as_factor)
+      # 3. Identify variables ACTUALLY in the model
+      #    We use all.vars(formula) to know what predictors exist.
+      model_vars <- tryCatch(all.vars(stats::formula(mdl)), error = function(e) character(0))
       
-      #    Build the spec formula
+      # 4. Build 'at' list ONLY for variables present in the model
+      at_list <- list()
+      
+      # Check for dose_factor
+      if ("dose_factor" %in% model_vars) {
+        selected_dose <- as.character(input$lmer_emmeans_dose %||% "0")
+        # Verify this level exists in the data to prevent "new level" errors
+        if (!is.null(emm_data) && "dose_factor" %in% names(emm_data)) {
+          valid_levels <- levels(emm_data$dose_factor)
+          if (!selected_dose %in% valid_levels) {
+            selected_dose <- valid_levels[1] # Fallback to first valid level
+          }
+        }
+        at_list$dose_factor <- selected_dose
+      } 
+      # Check for numeric dose terms (dose_log10, is_control)
+      else if ("dose_log10" %in% model_vars) {
+        selected_dose <- as.character(input$lmer_emmeans_dose %||% "0")
+        if (identical(selected_dose, "0")) {
+          if ("dose_log10" %in% model_vars) at_list$dose_log10 <- 0
+          if ("is_control" %in% model_vars) at_list$is_control <- 1
+        } else {
+          d_num <- suppressWarnings(as.numeric(selected_dose))
+          val <- ifelse(is.finite(d_num) && d_num > 0, log10(d_num), 0)
+          if ("dose_log10" %in% model_vars) at_list$dose_log10 <- val
+          if ("is_control" %in% model_vars) at_list$is_control <- 0
+        }
+      }
+      
+      # 5. Build spec formula (safe against missing variables)
       requested <- as.character(input$lmer_emmeans_by %||% "treatment")
       emm_specs <- make_safe_emm_specs(requested, mdl)
       
-      # 4. Call emmeans
-      #    Crucially, pass 'data' and 'params' explicitly!
+      # 6. Setup arguments and call emmeans
       args <- list(object = mdl, specs = emm_specs)
       
-      # Only pass 'at' if the vars exist in the model/data
-      mf_names <- names(emm_data)
-      can_use_at <- (use_dose_as_factor && "dose_factor" %in% mf_names) ||
-        (!use_dose_as_factor && all(c("dose_log10", "is_control") %in% mf_names))
+      # Only add 'at' if it's not empty
+      if (length(at_list) > 0) args$at <- at_list
       
-      if (can_use_at) args$at <- at_list
-      
-      # Explicitly pass the data and params from the active fit
+      # Explicitly pass data/params from active fit
       if (!is.null(emm_data)) args$data <- emm_data
       if (!is.null(emm_params) && length(emm_params) > 0) args$params <- emm_params
       
       # Run emmeans
       emm <- do.call(emmeans::emmeans, args)
       
-      # 5. Process results (summary, plot data)
+      # 7. Process results
       emm_tbl <- as.data.frame(summary(emm, infer = TRUE))
-      emm_tbl <- standardize_emm_columns(emm_tbl) # Your helper
+      emm_tbl <- standardize_emm_columns(emm_tbl)
+      
+      # Back-transform if needed
+      transform_info <- emm_params$outcome_transform %||% NULL
       bt <- back_transform_emm_df(emm_tbl, transform_info)
       emm_tbl <- bt$data
       transform_note <- bt$note
       
-      # Create a clean plot dataframe (filtering out non-finite CIs)
+      # Filter for plotting
       emm_plot_df <- dplyr::filter(emm_tbl, is.finite(emmean))
       
       list(
         emmeans = emm,
         emmeans_df = emm_tbl,
         emmeans_plot_df = emm_plot_df,
-        model_source = active_fit$source,
-        transform_note = transform_note,
-        transform_info = transform_info
+        source = active_fit$source,
+        transform_note = transform_note
       )
       
     }, error = function(e) {
@@ -5703,6 +5725,7 @@ server <- function(input, output, session) {
   output$lmer_emmeans_plot <- renderPlot({
     # Require EMMeans results and no upstream error
     results <- lmer_emmeans_results()
+    print(str(results))
     validate(need(!is.null(results$emmeans_df), "Calculate EM Means for mixed effects first"))
     validate(need(is.null(results$error), paste("Emmeans error:", results$error)))
     
