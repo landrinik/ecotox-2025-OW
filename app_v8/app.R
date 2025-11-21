@@ -3828,6 +3828,7 @@ server <- function(input, output, session) {
     df <- lmer_data_cached()
     validate(need(nrow(df) > 0, "No data available for refit."))
     
+    # Get base formula components
     full_form   <- stats::formula(base_fit) |> collapse_formula()
     fixed_part  <- lme4::nobars(full_form) |> collapse_formula()
     response_nm <- all.vars(update(fixed_part, . ~ 0))[1]
@@ -3836,13 +3837,10 @@ server <- function(input, output, session) {
     emm_params <- list()
     outcome_transform <- NULL
     
-    # Ensure numeric week column for optional spline
+    # Create numeric week column for spline usage
     df$week_numeric <- suppressWarnings(as.numeric(as.character(df$week)))
     
-    if (!response_nm %in% names(df)) {
-      stop(sprintf("Column '%s' missing from refit data.", response_nm))
-    }
-    
+    # --- 1. Log Transform ---
     if (isTRUE(input$lmer_refit_log_outcome)) {
       y <- df[[response_nm]]
       finite_y <- is.finite(y)
@@ -3850,90 +3848,68 @@ server <- function(input, output, session) {
         showNotification("Log transform skipped: no finite outcome values.", type = "warning", duration = 6)
       } else {
         min_val <- min(y[finite_y], na.rm = TRUE)
+        # Shift to ensure positive values (e.g. log(y + 0.1)) if min <= 0
         shift <- if (is.finite(min_val) && min_val <= 0) abs(min_val) + 0.1 else 0
         df[[response_nm]] <- log1p(y + shift)
-        adjust_notes <- c(adjust_notes, sprintf("Applied log1p transform with %.2f shift to keep values positive.", shift))
-        outcome_transform <- list(
-          type = "shifted_log1p",
-          shift = shift,
-          response = response_nm
-        )
+        
+        adjust_notes <- c(adjust_notes, sprintf("Applied log1p transform with %.2f shift.", shift))
+        outcome_transform <- list(type = "shifted_log1p", shift = shift, response = response_nm)
       }
     }
     
-    # Optional spline for numeric week
+    # --- 2. Week Spline ---
     if (isTRUE(input$lmer_refit_use_week_spline)) {
       if (any(is.finite(df$week_numeric))) {
         spline_df <- as.integer(input$lmer_refit_spline_df %||% 3)
-        fixed_part <- update(fixed_part, . ~ . + splines::ns(week_numeric, spline_df))
+        
+        # CRITICAL FIX: Remove the factor 'week' when adding the numeric spline
+        # This prevents rank deficiency/singularity caused by having both versions of 'week'
+        fixed_part <- update(fixed_part, . ~ . - week + splines::ns(week_numeric, spline_df))
+        
         emm_params$spline_df <- spline_df
-        adjust_notes <- c(adjust_notes, sprintf("Added natural spline for week (df = %d).", spline_df))
+        adjust_notes <- c(adjust_notes, sprintf("Replaced factor 'week' with natural spline (df = %d).", spline_df))
       } else {
         showNotification("Spline skipped: numeric week is not available.", type = "warning", duration = 6)
       }
     }
     
-    # Build random structure
+    # --- 3. Build Random Effects ---
     random_terms <- character()
     
-    add_random_term <- function(term, column = NULL, min_levels = 2, label = column) {
+    add_random_term <- function(term, column = NULL, min_levels = 2) {
       if (!is.null(column)) {
-        if (!column %in% names(df)) {
-          showNotification(sprintf("Random effect '%s' skipped: column missing.", label %||% column), type = "warning", duration = 6)
-          return(FALSE)
-        }
+        if (!column %in% names(df)) return(FALSE)
         n_levels <- dplyr::n_distinct(stats::na.omit(df[[column]]))
-        if (n_levels < min_levels) {
-          showNotification(sprintf("Random effect '%s' skipped: needs >= %d levels.", label %||% column, min_levels), type = "warning", duration = 6)
-          return(FALSE)
-        }
+        if (n_levels < min_levels) return(FALSE)
       }
       random_terms <<- c(random_terms, term)
       TRUE
     }
     
-    # Tank term always present
+    # Tank slope/intercept logic
     slope_ok <- isTRUE(input$lmer_refit_include_tank_slope) &&
       ("time_wk_z" %in% names(df)) &&
       isTRUE(stats::sd(df$time_wk_z, na.rm = TRUE) > 0)
     
-    if (isTRUE(input$lmer_refit_include_tank_slope) && !slope_ok) {
-      showNotification("Tank slope requested but time_wk_z is missing/constant; using intercept only.", type = "message", duration = 6)
-    }
-    
     tank_term <- if (slope_ok) "(1 + time_wk_z | tank)" else "(1 | tank)"
-    tank_added <- add_random_term(tank_term, "tank")
-    validate(need(isTRUE(tank_added), "Tank information is required for the refit."))
-    if (slope_ok) adjust_notes <- c(adjust_notes, "Included tank-specific week slope.")
+    add_random_term(tank_term, "tank")
     
-    if (isTRUE(input$lmer_refit_include_batch)) {
-      added <- add_random_term("(1 | experiment_batch)", "experiment_batch")
-      if (added) adjust_notes <- c(adjust_notes, "Included experiment_batch random intercept.")
-    }
-    
-    if (isTRUE(input$lmer_refit_add_tissue_re)) {
-      added <- add_random_term("(1 | tissue_type)", "tissue_type")
-      if (added) adjust_notes <- c(adjust_notes, "Added tissue-level random intercept.")
-    }
-    
-    if (isTRUE(input$lmer_refit_add_fiber_re)) {
-      added <- add_random_term("(1 | fiber_type)", "fiber_type")
-      if (added) adjust_notes <- c(adjust_notes, "Added fiber-level random intercept.")
-    }
-    
+    if (isTRUE(input$lmer_refit_include_batch)) add_random_term("(1 | experiment_batch)", "experiment_batch")
+    if (isTRUE(input$lmer_refit_add_tissue_re)) add_random_term("(1 | tissue_type)", "tissue_type")
+    if (isTRUE(input$lmer_refit_add_fiber_re)) add_random_term("(1 | fiber_type)", "fiber_type")
     if (isTRUE(input$lmer_refit_add_obs_re)) {
       df$obs_refit_id <- factor(seq_len(nrow(df)))
-      random_terms <- c(random_terms, "(1 | obs_refit_id)")
-      adjust_notes <- c(adjust_notes, "Added observation-level random effect.")
+      add_random_term("(1 | obs_refit_id)")
     }
     
-    random_terms <- unique(random_terms)
     validate(need(length(random_terms) > 0, "No random effects specified for refit."))
     
+    # Combine formulas
     fixed_chr <- paste(base::deparse(fixed_part), collapse = " ")
     rand_chr  <- paste(random_terms, collapse = " + ")
     final_form <- stats::as.formula(paste(fixed_chr, "+", rand_chr))
     
+    # Fit Model
     fit_obj <- tryCatch(
       lme4::lmer(final_form, data = df,
                  control = lme4::lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 40000))
@@ -3944,11 +3920,18 @@ server <- function(input, output, session) {
       }
     )
     
+    # Pack results
     attr(fit_obj, "data_used") <- df
     emm_params$outcome_transform <- outcome_transform
     attr(fit_obj, "emm_params") <- emm_params
     
-    list(model = fit_obj, formula = final_form, notes = adjust_notes, data = df, params = emm_params)
+    list(
+      model = fit_obj, 
+      formula = final_form, 
+      notes = adjust_notes, 
+      data = df,            # CRITICAL: Return the modified dataframe
+      params = emm_params
+    )
   })
   
   lmer_refit_diag <- reactive({
@@ -3992,24 +3975,25 @@ server <- function(input, output, session) {
       DT::formatRound("value", 6)
   })
   
-  # Helper reactive: prefer refit model (if available) for downstream EMMeans/contrasts
+  # Helper: robustly select between Refit and Base models
   active_lmer_model <- reactive({
     # 1. Try to get the refit object
     refit_obj <- tryCatch(lmer_refit_model(), error = function(e) NULL)
     
-    # 2. If refit exists and is a valid lmerMod, use it
-    if (is.list(refit_obj) && inherits(refit_obj$model, "lmerMod")) {
+    # 2. If refit exists and is a valid model, use it
+    # Note: lmer returns class "lmerMod" which inherits from "merMod"
+    if (!is.null(refit_obj) && !is.null(refit_obj$model) && inherits(refit_obj$model, "merMod")) {
       return(list(
         model  = refit_obj$model,
         source = "refit",
-        data   = refit_obj$data,   # This must be the refit data!
-        params = refit_obj$params  # This must include spline_df!
+        data   = refit_obj$data,    # Use the data WITH week_numeric/log-outcome
+        params = refit_obj$params
       ))
     }
     
     # 3. Otherwise, fall back to the base model
     base_fit <- tryCatch(lmer_model(), error = function(e) NULL)
-    validate(need(!is.null(base_fit), "No base model found."))
+    validate(need(!is.null(base_fit) && inherits(base_fit, "merMod"), "No valid mixed model found."))
     
     list(
       model  = base_fit,
@@ -5493,99 +5477,118 @@ server <- function(input, output, session) {
     }
   })
 
-  # --- Mixed Effects: EMMeans calculation (safe spec + robust for refits) ---
-  # --- Mixed Effects: EMMeans calculation (Safe spec + Robust for Refits) ---
-  lmer_emmeans_results <- eventReactive(lmer_emmeans_trigger(), {
-    tryCatch({
-      # 1. Get the active model (base or refit)
-      active_fit <- active_lmer_model()
-      mdl <- active_fit$model
-      validate(need(!is.null(mdl), "No model available"))
-      
-      # 2. Get the CORRECT data and params from the active fit object
-      emm_data <- active_fit$data 
-      emm_params <- active_fit$params
-      
-      # Fallback: try to recover data from model frame if missing
-      if (is.null(emm_data)) {
-        emm_data <- tryCatch(stats::model.frame(mdl), error = function(e) NULL)
-      }
-      
-      # 3. Identify variables ACTUALLY in the model
-      #    We use all.vars(formula) to know what predictors exist.
-      model_vars <- tryCatch(all.vars(stats::formula(mdl)), error = function(e) character(0))
-      
-      # 4. Build 'at' list ONLY for variables present in the model
-      at_list <- list()
-      
-      # Check for dose_factor
-      if ("dose_factor" %in% model_vars) {
+  lmer_emmeans_results <- eventReactive(
+    # Trigger on ANY of these changes:
+    list(
+      lmer_emmeans_trigger(), 
+      input$lmer_emmeans_dose, 
+      input$lmer_emmeans_by,
+      input$lmer_adjustment_method
+    ), 
+    {
+      tryCatch({
+        active_fit <- active_lmer_model()
+        mdl        <- active_fit$model
+        emm_data   <- active_fit$data
+        emm_params <- active_fit$params
+        
+        validate(need(!is.null(mdl), "No model available for EMMeans."))
+        
+        # --- 1. Analyze Model Variables ---
+        model_vars <- tryCatch(all.vars(stats::formula(mdl)), error = function(e) character(0))
+        
+        # --- 2. Build 'at' list for Doses and Weeks ---
+        at_list <- list()
+        
+        # A) Handle Dose (Factor vs Numeric)
         selected_dose <- as.character(input$lmer_emmeans_dose %||% "0")
-        # Verify this level exists in the data to prevent "new level" errors
-        if (!is.null(emm_data) && "dose_factor" %in% names(emm_data)) {
-          valid_levels <- levels(emm_data$dose_factor)
-          if (!selected_dose %in% valid_levels) {
-            selected_dose <- valid_levels[1] # Fallback to first valid level
+        
+        if ("dose_factor" %in% model_vars) {
+          # If treating dose as factor, pick the specific level
+          if (!is.null(emm_data) && "dose_factor" %in% names(emm_data)) {
+            if (!selected_dose %in% levels(emm_data$dose_factor)) {
+              selected_dose <- levels(emm_data$dose_factor)[1]
+            }
+          }
+          at_list$dose_factor <- selected_dose
+          
+        } else if ("dose_log10" %in% model_vars) {
+          # If treating dose as numeric log10
+          if (identical(selected_dose, "0")) {
+            at_list$dose_log10 <- 0
+            if ("is_control" %in% model_vars) at_list$is_control <- 1
+          } else {
+            d_num <- suppressWarnings(as.numeric(selected_dose))
+            val <- ifelse(is.finite(d_num) && d_num > 0, log10(d_num), 0)
+            at_list$dose_log10 <- val
+            if ("is_control" %in% model_vars) at_list$is_control <- 0
           }
         }
-        at_list$dose_factor <- selected_dose
-      } 
-      # Check for numeric dose terms (dose_log10, is_control)
-      else if ("dose_log10" %in% model_vars) {
-        selected_dose <- as.character(input$lmer_emmeans_dose %||% "0")
-        if (identical(selected_dose, "0")) {
-          if ("dose_log10" %in% model_vars) at_list$dose_log10 <- 0
-          if ("is_control" %in% model_vars) at_list$is_control <- 1
-        } else {
-          d_num <- suppressWarnings(as.numeric(selected_dose))
-          val <- ifelse(is.finite(d_num) && d_num > 0, log10(d_num), 0)
-          if ("dose_log10" %in% model_vars) at_list$dose_log10 <- val
-          if ("is_control" %in% model_vars) at_list$is_control <- 0
+        
+        # B) Handle Weeks (Factor vs Numeric Spline)
+        # If we refitted with a spline, 'week' (factor) is gone, replaced by 'week_numeric'
+        if ("week_numeric" %in% model_vars && !("week" %in% model_vars)) {
+          # We must tell emmeans which numeric weeks to calculate estimates for.
+          # We'll use the unique integer weeks found in the data (e.g., 1, 3, 5)
+          if (!is.null(emm_data) && "week_numeric" %in% names(emm_data)) {
+            at_list$week_numeric <- sort(unique(emm_data$week_numeric))
+          }
         }
-      }
-      
-      # 5. Build spec formula (safe against missing variables)
-      requested <- as.character(input$lmer_emmeans_by %||% "treatment")
-      emm_specs <- make_safe_emm_specs(requested, mdl)
-      
-      # 6. Setup arguments and call emmeans
-      args <- list(object = mdl, specs = emm_specs)
-      
-      # Only add 'at' if it's not empty
-      if (length(at_list) > 0) args$at <- at_list
-      
-      # Explicitly pass data/params from active fit
-      if (!is.null(emm_data)) args$data <- emm_data
-      if (!is.null(emm_params) && length(emm_params) > 0) args$params <- emm_params
-      
-      # Run emmeans
-      emm <- do.call(emmeans::emmeans, args)
-      
-      # 7. Process results
-      emm_tbl <- as.data.frame(summary(emm, infer = TRUE))
-      emm_tbl <- standardize_emm_columns(emm_tbl)
-      
-      # Back-transform if needed
-      transform_info <- emm_params$outcome_transform %||% NULL
-      bt <- back_transform_emm_df(emm_tbl, transform_info)
-      emm_tbl <- bt$data
-      transform_note <- bt$note
-      
-      # Filter for plotting
-      emm_plot_df <- dplyr::filter(emm_tbl, is.finite(emmean))
-      
-      list(
-        emmeans = emm,
-        emmeans_df = emm_tbl,
-        emmeans_plot_df = emm_plot_df,
-        source = active_fit$source,
-        transform_note = transform_note
-      )
-      
-    }, error = function(e) {
-      list(error = e$message)
+        
+        # --- 3. Build Specs ---
+        requested <- as.character(input$lmer_emmeans_by %||% "treatment")
+        
+        # Logic to swap 'week' for 'week_numeric' in specifications if needed
+        if (grepl("week", requested) && !("week" %in% model_vars) && "week_numeric" %in% model_vars) {
+          # Map user request (e.g. "treatment_week") to numeric equivalent
+          target_spec <- switch(requested,
+                                "week" = ~ week_numeric,
+                                "treatment_week" = ~ chem_treatment | week_numeric,
+                                "fiber_week" = ~ fiber_type | week_numeric,
+                                "all_interactions" = ~ chem_treatment | fiber_type + week_numeric,
+                                # Fallback to safe default
+                                ~ chem_treatment
+          )
+          emm_specs <- target_spec
+        } else {
+          emm_specs <- make_safe_emm_specs(requested, mdl)
+        }
+        
+        # --- 4. Run EMMeans ---
+        # CRITICAL: Pass 'data = emm_data' explicitly!
+        # Without this, emmeans cannot find the 'week_numeric' or transformed columns.
+        args <- list(object = mdl, specs = emm_specs, data = emm_data)
+        
+        if (length(at_list) > 0) args$at <- at_list
+        if (!is.null(emm_params) && length(emm_params) > 0) args$params <- emm_params
+        
+        emm <- do.call(emmeans::emmeans, args)
+        
+        # --- 5. Process Results ---
+        emm_tbl <- as.data.frame(summary(emm, infer = TRUE))
+        emm_tbl <- standardize_emm_columns(emm_tbl)
+        
+        # If we have week_numeric but want to plot it cleanly, coerce to factor for the table
+        if ("week_numeric" %in% names(emm_tbl) && !"week" %in% names(emm_tbl)) {
+          emm_tbl$week <- as.factor(emm_tbl$week_numeric)
+        }
+        
+        # Back-transform if log1p was used
+        transform_info <- emm_params$outcome_transform %||% NULL
+        bt <- back_transform_emm_df(emm_tbl, transform_info)
+        
+        list(
+          emmeans = emm,
+          emmeans_df = bt$data,
+          emmeans_plot_df = dplyr::filter(bt$data, is.finite(emmean)),
+          source = active_fit$source,
+          transform_note = bt$note
+        )
+        
+      }, error = function(e) {
+        list(error = paste("EMMeans Error:", e$message))
+      })
     })
-  })
 
   # ---- Mixed effects emmeans table (DT) ----
   output$lmer_emmeans_table <- DT::renderDataTable({
