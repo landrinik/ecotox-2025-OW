@@ -5534,6 +5534,18 @@ server <- function(input, output, session) {
         # --- 1. Analyze Model Variables ---
         model_vars <- tryCatch(all.vars(stats::formula(mdl)), error = function(e) character(0))
         
+        # Keep helper columns present for EMMeans grid construction even after
+        # refits that swap factor week for splines or transform the response.
+        # This prevents "undefined columns selected" errors when emmeans looks
+        # for the raw covariates.
+        if (!"week_numeric" %in% names(emm_data) && "week" %in% names(emm_data)) {
+          emm_data$week_numeric <- suppressWarnings(as.numeric(as.character(emm_data$week)))
+        }
+        
+        # Record which variables emmeans will need so we can validate early
+        requested <- as.character(input$lmer_emmeans_by %||% "treatment")
+        spec_vars <- character()
+        
         # --- 2. Build 'at' list for Doses and Weeks ---
         at_list <- list()
         
@@ -5573,8 +5585,6 @@ server <- function(input, output, session) {
         }
         
         # --- 3. Build Specs ---
-        requested <- as.character(input$lmer_emmeans_by %||% "treatment")
-        
         # Logic to swap 'week' for 'week_numeric' in specifications if needed
         if (grepl("week", requested) && !("week" %in% model_vars) && "week_numeric" %in% model_vars) {
           # Map user request (e.g. "treatment_week") to numeric equivalent
@@ -5587,9 +5597,21 @@ server <- function(input, output, session) {
                                 ~ chem_treatment
           )
           emm_specs <- target_spec
+          spec_vars <- all.vars(emm_specs)
         } else {
           emm_specs <- make_safe_emm_specs(requested, mdl)
+          spec_vars <- all.vars(emm_specs)
         }
+        
+        # Validate that all variables referenced by specs/at are actually in the
+        # data passed to emmeans. This keeps refit-specific columns (e.g.,
+        # week_numeric) in sync and surfaces a clear message instead of a silent
+        # plot failure.
+        needed_vars <- unique(c(names(at_list), spec_vars))
+        missing_vars <- setdiff(needed_vars, names(emm_data))
+        validate(need(length(missing_vars) == 0,
+                      paste("EMMeans requires the following columns in the refit data:",
+                            paste(missing_vars, collapse = ", "))))
         
         # --- 4. Run EMMeans ---
         # CRITICAL: Pass 'data = emm_data' explicitly!
