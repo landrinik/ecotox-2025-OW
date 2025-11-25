@@ -1123,6 +1123,10 @@ ui <- fluidPage(
                 class = "btn-sm btn-warning",
                 icon = icon("image")
               ),
+              h5("Stratified Interaction Analysis (Granular ANOVA)"),
+              helpText("This table breaks down significance by Week and Fiber. Values are P-values."),
+              DT::dataTableOutput("lmer_granular_summary"),
+              br(),
               h5("Estimated Marginal Means"), plotOutput("lmer_emmeans_plot", height = "420px"),
               DT::dataTableOutput("lmer_emmeans_table"),
               h5("Pairwise / Custom Contrasts"), DT::dataTableOutput("lmer_pairwise_table"),
@@ -4310,6 +4314,54 @@ server <- function(input, output, session) {
     )
   })
   
+  # ----------------------------------------------------------------------
+  # GRANULAR ANOVA OUTPUT
+  # ----------------------------------------------------------------------
+  output$lmer_granular_summary <- DT::renderDataTable({
+    # 1. Get the active model (handles base vs refit logic automatically)
+    fit_list <- active_lmer_model()
+    validate(need(!is.null(fit_list$model), "Run Mixed Model first."))
+    
+    # 2. Generate the summary
+    df_summary <- generate_granular_anova(
+      model = fit_list$model, 
+      data  = fit_list$data
+    )
+    
+    # 3. Identify Week columns dynamically for styling
+    week_cols <- grep("Week", names(df_summary), value = TRUE)
+    
+    # 4. Render with conditional formatting
+    DT::datatable(
+      df_summary,
+      options = list(
+        dom = 't', # Simple table, no search/pagination
+        scrollX = TRUE,
+        pageLength = 20
+      ),
+      rownames = FALSE,
+      caption = "P-values for fixed effects (Treatment, Concentration) tested within each Fiber and Week."
+    ) %>%
+      # Round P-values
+      DT::formatRound(columns = week_cols, digits = 4) %>%
+      # Apply color scale: Green for significant (< 0.05), darker green for highly significant
+      DT::formatStyle(
+        columns = week_cols,
+        backgroundColor = DT::styleInterval(
+          cuts = c(0.001, 0.01, 0.05),
+          values = c("#a5d6a7", "#c8e6c9", "#e8f5e9", "white") # Dark Green -> Light Green -> White
+        ),
+        fontWeight = DT::styleInterval(
+          cuts = c(0.05),
+          values = c("bold", "normal")
+        ),
+        color = DT::styleInterval(
+          cuts = c(0.05),
+          values = c("black", "#cccccc") # Dim non-significant results
+        )
+      )
+  })
+  
   # ============================================================================
   # LINEAR TRENDS ANALYSIS - SERVER CODE (OPTION 2: REFIT WITH NUMERIC WEEK)
   # ============================================================================
@@ -6196,6 +6248,18 @@ server <- function(input, output, session) {
     # Move row names (Terms) to a proper column
     anova_df$Term <- rownames(anova_df)
     
+    # Ensure all fixed-effect terms from the model formula appear in the table
+    fixed_terms <- attr(stats::terms(lme4::nobars(stats::formula(model))), "term.labels")
+    if (!is.null(fixed_terms) && length(fixed_terms) > 0) {
+      anova_df <- merge(
+        data.frame(Term = fixed_terms, stringsAsFactors = FALSE),
+        anova_df,
+        by = "Term",
+        all.x = TRUE,
+        sort = FALSE
+      )
+    }
+    
     names(anova_df) <- gsub("Pr\\(>Chisq\\)", "P_Value", names(anova_df))
     names(anova_df) <- gsub("Pr\\(>F\\)", "P_Value", names(anova_df))
     names(anova_df) <- gsub("Sum Sq", "Sum_Squares", names(anova_df))
@@ -6273,6 +6337,18 @@ server <- function(input, output, session) {
       )
       df <- as.data.frame(anova_res)
       df$Term <- rownames(df)
+      
+      # Preserve all fixed-effect terms from the fitted model (even if dropped in ANOVA)
+      fixed_terms <- attr(stats::terms(lme4::nobars(stats::formula(fit_list$model))), "term.labels")
+      if (!is.null(fixed_terms) && length(fixed_terms) > 0) {
+        df <- merge(
+          data.frame(Term = fixed_terms, stringsAsFactors = FALSE),
+          df,
+          by = "Term",
+          all.x = TRUE,
+          sort = FALSE
+        )
+      }
       
       # 2. Format Terms (Interaction x, Title Case)
       #    Replace ':' with ' x '

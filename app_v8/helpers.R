@@ -555,3 +555,92 @@ save_gt_table <- function(gt_tbl, file_path_no_ext, width_px = 2000, height_px =
   
   invisible(file_path_no_ext)
 }
+
+
+# ==============================================================================
+# GRANULAR ANOVA SUMMARY GENERATOR
+# Uses emmeans::joint_tests to break down interactions
+# ==============================================================================
+
+generate_granular_anova <- function(model, data) {
+  require(emmeans)
+  require(dplyr)
+  require(tidyr)
+  require(stringr)
+  
+  # 1. Determine available factors in the model to stratify by
+  # We want to test effects nested within Fiber and Week
+  model_vars <- all.vars(stats::formula(model))
+  
+  # Check which variables exist in the data/model
+  has_week <- any(grepl("week", names(data), ignore.case = TRUE))
+  has_fiber <- "fiber_type" %in% names(data)
+  
+  # Define stratification: We usually want to see effects BY Week and BY Fiber
+  by_vars <- character()
+  if (has_week) by_vars <- c(by_vars, "week")
+  if (has_fiber) by_vars <- c(by_vars, "fiber_type")
+  
+  # 2. Run Joint Tests
+  # This performs F-tests for the remaining fixed effects (Treatment, Concentration)
+  # within each combination of the 'by' variables.
+  tryCatch({
+    jt <- emmeans::joint_tests(model, by = by_vars) %>%
+      as.data.frame()
+    
+    # 3. Clean and Pivot the Data
+    # The goal: Rows = Context (Fiber) + Effect (Treatment/Conc), Columns = Weeks
+    
+    # Clean term names
+    jt <- jt %>%
+      dplyr::mutate(
+        term_clean = stringr::str_to_title(gsub("_", " ", `model term`)),
+        # Create a significance flag for internal logic
+        sig_symbol = dplyr::case_when(
+          p.value < 0.001 ~ "***",
+          p.value < 0.01  ~ "**",
+          p.value < 0.05  ~ "*",
+          TRUE ~ ""
+        ),
+        # Combine P-value and symbol for display, or keep numeric for heatmap
+        p_display = p.value # Keep numeric for DT conditional formatting
+      )
+    
+    # Handle structure based on what variables we have
+    if ("week" %in% names(jt) && "fiber_type" %in% names(jt)) {
+      
+      # Pivot Weeks to columns
+      jt_wide <- jt %>%
+        dplyr::select(fiber_type, term_clean, week, p_display) %>%
+        tidyr::pivot_wider(
+          names_from = week, 
+          names_prefix = "Week ", 
+          values_from = p_display
+        ) %>%
+        dplyr::arrange(fiber_type, term_clean) %>%
+        dplyr::rename(
+          `Fiber Type` = fiber_type,
+          `Effect Tested` = term_clean
+        )
+      
+      return(jt_wide)
+      
+    } else if ("week" %in% names(jt)) {
+      # Only Week is available (e.g. if Fiber not in model)
+      jt_wide <- jt %>%
+        dplyr::select(term_clean, week, p_display) %>%
+        tidyr::pivot_wider(
+          names_from = week, 
+          names_prefix = "Week ", 
+          values_from = p_display
+        )
+      return(jt_wide)
+    } else {
+      # Fallback: standard table if no week
+      return(jt %>% dplyr::select(everything()))
+    }
+    
+  }, error = function(e) {
+    return(data.frame(Error = paste("Could not generate granular ANOVA:", e$message)))
+  })
+}
