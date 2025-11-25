@@ -6260,23 +6260,7 @@ server <- function(input, output, session) {
   # --- Download Handler for Mixed Effects ANOVA (PNG) ---
   output$download_lmer_anova <- downloadHandler(
     filename = function() {
-      # 1. Get filters specifically from the Mixed Effects sidebar
-      #    (Ensure these match your UI definitions: lmer_fiber, lmer_tissues)
-      f_val <- input$lmer_fiber
-      if (is.null(f_val) || length(f_val) == 0) f_val <- "all"
-      
-      t_val <- input$lmer_tissues # or input$reg_tissues if shared
-      # Fallback if lmer_tissues is NULL (e.g. not selected yet)
-      if (is.null(t_val) || length(t_val) == 0) t_val <- "all"
-      
-      # 2. Collapse multiple selections if any
-      f_str <- paste(f_val, collapse = "_")
-      t_str <- paste(t_val, collapse = "_")
-      
-      # 3. Sanitize and build filename
-      #    e.g., "Cotton_gills_anova.png"
-      clean_name <- gsub("[^[:alnum:]_]", "", paste(f_str, t_str, sep = "_"))
-      paste0(clean_name, "_anova.png")
+      paste0(lmer_download_prefix(), "_anova.png")
     },
     content = function(file) {
       fit_list <- active_lmer_model()
