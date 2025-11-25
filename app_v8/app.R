@@ -1115,13 +1115,26 @@ ui <- fluidPage(
             mainPanel(
               width = 8,
               h5("Mixed Model Summary"), verbatimTextOutput("lmer_model_summary"),
-              h5("ANOVA Table"), gt::gt_output("lmer_anova"),
+              h5("ANOVA Table"),
+              gt::gt_output("lmer_anova"),
+              downloadButton(
+                "download_lmer_anova",
+                "Download ANOVA PNG",
+                class = "btn-sm btn-warning",
+                icon = icon("image")
+              ),
               h5("Estimated Marginal Means"), plotOutput("lmer_emmeans_plot", height = "420px"),
               DT::dataTableOutput("lmer_emmeans_table"),
               h5("Pairwise / Custom Contrasts"), DT::dataTableOutput("lmer_pairwise_table"),
               h5("Model Comparison (lm vs lmer)"), DT::dataTableOutput("model_compare"),
               # --- Diagnostics (Mixed Effects) ---
               h5("Diagnostics"),
+              downloadButton(
+                "download_lmer_diag_png",
+                "Download Diagnostics PNG",
+                class = "btn-sm btn-warning",
+                icon = icon("image")
+              ),
               tabsetPanel(
                 id = "lmer_diag_tabs",
                 tabPanel(
@@ -3817,6 +3830,51 @@ server <- function(input, output, session) {
     )
   })
   
+  lmer_active_diag_plot <- reactive({
+    diag_obj <- lmer_diag()
+    tab <- input$lmer_diag_tabs %||% "DHARMa residuals"
+    
+    switch(tab,
+           "DHARMa residuals" = list(type = "dharma", object = diag_obj$sim),
+           "Residuals vs Fitted" = list(type = "ggplot", plot = diag_obj$p_res_fit),
+           "Random effects (BLUPs)" = list(type = "ggplot", plot = diag_obj$p_re),
+           NULL)
+  })
+  
+  output$download_lmer_diag_png <- downloadHandler(
+    filename = function() paste0(lmer_download_prefix(), "_diag.png"),
+    content = function(file) {
+      plot_info <- lmer_active_diag_plot()
+      if (is.null(plot_info)) {
+        stop("Select a diagnostics plot to download.")
+      }
+      
+      if (identical(plot_info$type, "dharma")) {
+        png(
+          file,
+          width = plot_export_settings$width * plot_export_settings$dpi,
+          height = plot_export_settings$height * plot_export_settings$dpi,
+          res = plot_export_settings$dpi
+        )
+        on.exit(grDevices::dev.off(), add = TRUE)
+        graphics::plot(plot_info$object)
+      } else if (identical(plot_info$type, "ggplot")) {
+        ggplot2::ggsave(
+          filename = file,
+          plot = plot_info$plot,
+          device = "png",
+          width = plot_export_settings$width,
+          height = plot_export_settings$height,
+          units = plot_export_settings$units,
+          dpi = plot_export_settings$dpi,
+          bg = "white"
+        )
+      } else {
+        stop("Selected diagnostics tab is not downloadable.")
+      }
+    }
+  )
+  
   # ============================================================================
   # OPTIONAL LMER REFIT DRIVEN BY DIAGNOSTICS
   # ============================================================================
@@ -6087,15 +6145,33 @@ server <- function(input, output, session) {
     cat("\nRandom-effects singular? ", lme4::isSingular(fit, tol = 1e-4), "\n")
   })
   
+  lmer_download_prefix <- reactive({
+    fiber_sel <- tolower(input$lmer_fiber_types %||% character(0))
+    sample_sel <- if (identical(input$lmer_dataset, "assay")) {
+      tolower(input$lmer_sample_types %||% character(0))
+    } else if (identical(input$lmer_dataset, "physical") && identical(input$lmer_endpoint, "mf_counts")) {
+      tolower(input$lmer_tissue_types %||% character(0))
+    } else {
+      tolower(input$lmer_endpoint %||% character(0))
+    }
+    
+    pick_tag <- function(vals, fallback = "mixed") {
+      vals <- vals[nzchar(vals)]
+      if (length(vals) == 1L) vals else if (length(vals) == 0L) fallback else "mixed"
+    }
+    
+    fiber_tag <- pick_tag(fiber_sel)
+    sample_tag <- pick_tag(sample_sel, fallback = "all")
+    gsub("_+", "_", paste(fiber_tag, sample_tag, sep = "_"))
+  })
+  
   # ---- Mixed effects ANOVA (robust DT) ----
-  output$lmer_anova <- gt::render_gt({
-    # 1. Retrieve the active model (base or refit)
+  lmer_anova_table <- reactive({
     fit_list <- active_lmer_model()
     
-    # 2. Validate that a model exists
-    validate(
-      need(!is.null(fit_list) && !is.null(fit_list$model), "No model fitted yet.")
-    )
+    if (is.null(fit_list) || is.null(fit_list$model)) {
+      return(NULL)
+    }
     
     model <- fit_list$model
     
@@ -6120,18 +6196,20 @@ server <- function(input, output, session) {
     # Move row names (Terms) to a proper column
     anova_df$Term <- rownames(anova_df)
     
-    # Reorder to put 'Term' first
-    if ("Term" %in% names(anova_df)) {
-      anova_df <- anova_df[, c("Term", setdiff(names(anova_df), "Term"))]
+    names(anova_df) <- gsub("Pr\\(>Chisq\\)", "P_Value", names(anova_df))
+    names(anova_df) <- gsub("Pr\\(>F\\)", "P_Value", names(anova_df))
+    names(anova_df) <- gsub("Sum Sq", "Sum_Squares", names(anova_df))
+    names(anova_df) <- gsub("Mean Sq", "Mean_Squares", names(anova_df))
+    names(anova_df) <- gsub("Chisq", "Chi_Square", names(anova_df))
+    
+    if (!"Chi_Square" %in% names(anova_df) && "F value" %in% names(anova_df)) {
+      anova_df$Chi_Square <- anova_df$`F value`
     }
     
-    # 5. Clean up column names to be more readable
-    #    Common car::Anova cols: "Chisq", "Df", "Pr(>Chisq)"
-    colnames(anova_df) <- gsub("Pr\\(>Chisq\\)", "P_Value", colnames(anova_df))
-    colnames(anova_df) <- gsub("Chisq", "Chi_Square", colnames(anova_df))
-    colnames(anova_df) <- gsub("Pr\\(>F\\)", "P_Value", colnames(anova_df)) # For F-tests
+    desired_cols <- c("Term", "Chi_Square", "Df", "P_Value")
+    existing_cols <- intersect(desired_cols, names(anova_df))
+    anova_df <- anova_df[, unique(c(existing_cols, setdiff(names(anova_df), existing_cols))), drop = FALSE]
     
-    # 6. Create and format the gt table
     gt::gt(anova_df) %>%
       # Format numeric columns (Chi-Square, F values) to 3 decimals
       gt::fmt_number(
@@ -6172,6 +6250,86 @@ server <- function(input, output, session) {
         use_compact_mode = TRUE
       )
   })
+  
+  output$lmer_anova <- gt::render_gt({
+    tbl <- lmer_anova_table()
+    validate(need(!is.null(tbl), "No model fitted yet."))
+    tbl
+  })
+  
+  # --- Download Handler for Mixed Effects ANOVA (PNG) ---
+  output$download_lmer_anova <- downloadHandler(
+    filename = function() {
+      # 1. Get filters specifically from the Mixed Effects sidebar
+      #    (Ensure these match your UI definitions: lmer_fiber, lmer_tissues)
+      f_val <- input$lmer_fiber
+      if (is.null(f_val) || length(f_val) == 0) f_val <- "all"
+      
+      t_val <- input$lmer_tissues # or input$reg_tissues if shared
+      # Fallback if lmer_tissues is NULL (e.g. not selected yet)
+      if (is.null(t_val) || length(t_val) == 0) t_val <- "all"
+      
+      # 2. Collapse multiple selections if any
+      f_str <- paste(f_val, collapse = "_")
+      t_str <- paste(t_val, collapse = "_")
+      
+      # 3. Sanitize and build filename
+      #    e.g., "Cotton_gills_anova.png"
+      clean_name <- gsub("[^[:alnum:]_]", "", paste(f_str, t_str, sep = "_"))
+      paste0(clean_name, "_anova.png")
+    },
+    content = function(file) {
+      fit_list <- active_lmer_model()
+      req(fit_list$model)
+      
+      # 1. Calculate ANOVA (Type III Wald)
+      anova_res <- tryCatch(
+        car::Anova(fit_list$model, type = 3), 
+        error = function(e) anova(fit_list$model)
+      )
+      df <- as.data.frame(anova_res)
+      df$Term <- rownames(df)
+      
+      # 2. Format Terms (Interaction x, Title Case)
+      #    Replace ':' with ' x '
+      df$Term <- gsub(":", " x ", df$Term)
+      #    Remove underscores and Capitalize
+      df$Term <- tools::toTitleCase(gsub("_", " ", df$Term))
+      #    Clean up intercept
+      df$Term <- gsub("\\(Intercept\\)", "Intercept", df$Term)
+      
+      #    Reorder columns: Term first
+      if ("Term" %in% names(df)) {
+        df <- df[, c("Term", setdiff(names(df), "Term"))]
+      }
+      
+      # 3. Create formatted GT table
+      gt_tbl <- gt::gt(df) %>%
+        gt::fmt_number(columns = where(is.numeric), decimals = 3) %>%
+        gt::fmt_number(columns = matches("P|Pr"), decimals = 4) %>%
+        gt::cols_label(
+          Term = "Fixed Effect",
+          `Pr(>Chisq)` = "P-Value",
+          Chisq = "Chi-Square",
+          `Df` = "DF"
+        ) %>%
+        gt::tab_header(
+          title = "Analysis of Variance",
+          subtitle = "Type III Wald F tests with Kenward-Roger df"
+        ) %>%
+        gt::tab_style(
+          style = gt::cell_text(weight = "bold"),
+          locations = gt::cells_body(
+            columns = matches("P|Pr"), 
+            rows = if("Pr(>Chisq)" %in% names(df)) df[["Pr(>Chisq)"]] < 0.05 else FALSE
+          )
+        )
+      
+      # 4. Save as PNG using webshot2 via gt
+      gt::gtsave(gt_tbl, filename = file)
+    },
+    contentType = "image/png"
+  )
   
   # Model comparison output
   output$model_compare <- DT::renderDataTable({
