@@ -558,89 +558,244 @@ save_gt_table <- function(gt_tbl, file_path_no_ext, width_px = 2000, height_px =
 
 
 # ==============================================================================
-# GRANULAR ANOVA SUMMARY GENERATOR
-# Uses emmeans::joint_tests to break down interactions
+# GRANULAR ANOVA SUMMARY GENERATOR (ROBUST & REFIT-AWARE)
 # ==============================================================================
-
-generate_granular_anova <- function(model, data) {
+generate_granular_anova <- function(model, data, return_format = "numeric") {
   require(emmeans)
   require(dplyr)
   require(tidyr)
   require(stringr)
   
-  # 1. Determine available factors in the model to stratify by
-  # We want to test effects nested within Fiber and Week
-  model_vars <- all.vars(stats::formula(model))
+  # 1. Identify predictors actually used in the model formula
+  model_terms <- tryCatch(
+    all.vars(stats::formula(model)), 
+    error = function(e) character(0)
+  )
   
-  # Check which variables exist in the data/model
-  has_week <- any(grepl("week", names(data), ignore.case = TRUE))
-  has_fiber <- "fiber_type" %in% names(data)
+  # 2. Detect Time Variable (Factor 'week' vs Spline 'week_numeric')
+  time_var <- if ("week_numeric" %in% model_terms) "week_numeric" else "week"
   
-  # Define stratification: We usually want to see effects BY Week and BY Fiber
-  by_vars <- character()
-  if (has_week) by_vars <- c(by_vars, "week")
-  if (has_fiber) by_vars <- c(by_vars, "fiber_type")
+  # 3. Define Stratification
+  potential_by <- c(time_var, "fiber_type")
+  by_vars <- intersect(potential_by, model_terms)
   
-  # 2. Run Joint Tests
-  # This performs F-tests for the remaining fixed effects (Treatment, Concentration)
-  # within each combination of the 'by' variables.
   tryCatch({
-    jt <- emmeans::joint_tests(model, by = by_vars) %>%
-      as.data.frame()
+    # 4. Prepare 'at' list for Splines
+    at_list <- list()
+    if (time_var == "week_numeric" && "week_numeric" %in% names(data)) {
+      at_list$week_numeric <- sort(unique(data$week_numeric))
+    }
     
-    # 3. Clean and Pivot the Data
-    # The goal: Rows = Context (Fiber) + Effect (Treatment/Conc), Columns = Weeks
+    # 5. Run Joint Tests
+    jt <- emmeans::joint_tests(
+      model, 
+      by = by_vars, 
+      data = data,
+      at = if(length(at_list) > 0) at_list else NULL
+    ) %>% as.data.frame()
     
-    # Clean term names
+    if (nrow(jt) == 0) return(data.frame(Message = "No joint tests results available."))
+    
+    # 6. Standardize 'week' column for downstream processing
+    if (time_var == "week_numeric" && "week_numeric" %in% names(jt)) {
+      jt$week <- jt$week_numeric
+    }
+    
+    # 7. Add Context (Fiber/Sample) if missing
+    if (!"fiber_type" %in% names(jt)) {
+      val <- if("fiber_type" %in% names(data)) unique(as.character(data$fiber_type)) else "Mixed"
+      jt$fiber_type <- if(length(val) == 1) val else "Mixed"
+    }
+    
+    if (!"sample_type" %in% names(jt)) {
+      val <- "Unknown"
+      if ("sample_type" %in% names(data)) val <- unique(as.character(data$sample_type))
+      else if ("tissue_type" %in% names(data)) val <- unique(as.character(data$tissue_type))
+      jt$sample_type <- if(length(val) == 1) val else "Mixed"
+    }
+    
+    # 8. Format Terms & Values
     jt <- jt %>%
       dplyr::mutate(
-        term_clean = stringr::str_to_title(gsub("_", " ", `model term`)),
-        # Create a significance flag for internal logic
-        sig_symbol = dplyr::case_when(
-          p.value < 0.001 ~ "***",
-          p.value < 0.01  ~ "**",
-          p.value < 0.05  ~ "*",
-          TRUE ~ ""
-        ),
-        # Combine P-value and symbol for display, or keep numeric for heatmap
-        p_display = p.value # Keep numeric for DT conditional formatting
+        term_clean = stringr::str_to_title(gsub("_", " ", `model term`))
       )
     
-    # Handle structure based on what variables we have
-    if ("week" %in% names(jt) && "fiber_type" %in% names(jt)) {
-      
-      # Pivot Weeks to columns
-      jt_wide <- jt %>%
-        dplyr::select(fiber_type, term_clean, week, p_display) %>%
-        tidyr::pivot_wider(
-          names_from = week, 
-          names_prefix = "Week ", 
-          values_from = p_display
-        ) %>%
-        dplyr::arrange(fiber_type, term_clean) %>%
-        dplyr::rename(
-          `Fiber Type` = fiber_type,
-          `Effect Tested` = term_clean
+    if ("F.ratio" %in% names(jt)) {
+      jt$stat_val <- jt$F.ratio; jt$stat_lab <- "F"
+    } else if ("Chisq" %in% names(jt)) {
+      jt$stat_val <- jt$Chisq; jt$stat_lab <- "Chi2"
+    } else {
+      jt$stat_val <- NA_real_; jt$stat_lab <- "?"
+    }
+    
+    if (return_format == "composite") {
+      jt <- jt %>%
+        dplyr::mutate(
+          cell_value = dplyr::case_when(
+            is.na(p.value) | is.na(stat_val) ~ "NA",
+            TRUE ~ sprintf("%s (%s=%.1f)", format.pval(p.value, digits = 3, eps = 0.001), stat_lab, stat_val)
+          )
         )
-      
-      return(jt_wide)
-      
-    } else if ("week" %in% names(jt)) {
-      # Only Week is available (e.g. if Fiber not in model)
+    } else {
+      jt <- jt %>% dplyr::mutate(cell_value = p.value)
+    }
+    
+    # 9. Pivot
+    if ("week" %in% names(jt)) {
+      jt$week_label <- paste("Week", jt$week)
       jt_wide <- jt %>%
-        dplyr::select(term_clean, week, p_display) %>%
-        tidyr::pivot_wider(
-          names_from = week, 
-          names_prefix = "Week ", 
-          values_from = p_display
-        )
+        dplyr::select(sample_type, fiber_type, term_clean, week_label, cell_value) %>%
+        tidyr::pivot_wider(names_from = week_label, values_from = cell_value) %>%
+        dplyr::arrange(sample_type, fiber_type, term_clean) %>%
+        dplyr::rename(`Sample` = sample_type, `Fiber` = fiber_type, `Effect Tested` = term_clean)
       return(jt_wide)
     } else {
-      # Fallback: standard table if no week
-      return(jt %>% dplyr::select(everything()))
+      return(jt %>% dplyr::select(sample_type, fiber_type, term_clean, stat_lab, stat_val, p.value))
     }
     
   }, error = function(e) {
-    return(data.frame(Error = paste("Could not generate granular ANOVA:", e$message)))
+    return(data.frame(Error = paste("Granular ANOVA Error:", e$message)))
+  })
+}
+
+# ==============================================================================
+# DOSE-RESPONSE VISUALIZATION (Refit-Aware)
+# ==============================================================================
+generate_dose_response_data <- function(model, data) {
+  require(emmeans)
+  require(dplyr)
+  
+  # Helper: Fix CI names
+  fix_ci_names <- function(d) {
+    if ("asymp.LCL" %in% names(d)) d <- dplyr::rename(d, lower.CL = asymp.LCL)
+    if ("asymp.UCL" %in% names(d)) d <- dplyr::rename(d, upper.CL = asymp.UCL)
+    d
+  }
+  
+  vars <- all.vars(stats::formula(model))
+  
+  # Time variable check
+  time_var <- if ("week_numeric" %in% vars) "week_numeric" else "week"
+  
+  # Determine Grouping Variables
+  group_terms <- c("chem_treatment")
+  if (time_var %in% vars) group_terms <- c(group_terms, time_var)
+  if ("fiber_type" %in% vars) group_terms <- c(group_terms, "fiber_type")
+  
+  # --- SCENARIO A: Factor Dose ---
+  if ("dose_factor" %in% vars) {
+    f_str <- paste("~ dose_factor +", paste(group_terms, collapse = "+"))
+    specs_formula <- stats::as.formula(f_str)
+    
+    emm <- emmeans::emmeans(model, specs = specs_formula, data = data)
+    df <- as.data.frame(summary(emm))
+    df <- fix_ci_names(df)
+    
+    # Rename week_numeric to week for plotting consistency
+    if (time_var == "week_numeric" && "week_numeric" %in% names(df)) {
+      df$week <- as.factor(df$week_numeric)
+    }
+    
+    num_vals <- suppressWarnings(as.numeric(as.character(df$dose_factor)))
+    df$dose_disp <- if(any(is.na(num_vals))) df$dose_factor else num_vals
+    
+    return(df)
+  }
+  
+  # --- SCENARIO B: Numeric Log Dose ---
+  
+  # 1. Define Formulas
+  f_base <- paste("~", paste(group_terms, collapse = "+"))
+  specs_base <- stats::as.formula(f_base)
+  f_dose <- paste("~", paste(c(group_terms, "dose_log10"), collapse = "+"))
+  specs_dose <- stats::as.formula(f_dose)
+  
+  # 2. Control Points (Dose=0)
+  at_ctrl <- list(dose_log10 = 0, is_control = 1)
+  if (time_var == "week_numeric") {
+    at_ctrl$week_numeric <- sort(unique(data$week_numeric))
+  }
+  
+  emm_ctrl <- emmeans::emmeans(model, specs_base, at = at_ctrl, data = data)
+  df_ctrl  <- as.data.frame(summary(emm_ctrl))
+  df_ctrl  <- fix_ci_names(df_ctrl)
+  df_ctrl$dose_disp <- 0 
+  
+  # 3. Treated Points
+  at_dose <- list(dose_log10 = c(2, 3, 4), is_control = 0)
+  if (time_var == "week_numeric") {
+    at_dose$week_numeric <- sort(unique(data$week_numeric))
+  }
+  
+  emm_dose <- emmeans::emmeans(model, specs_dose, at = at_dose, data = data)
+  df_dose  <- as.data.frame(summary(emm_dose))
+  df_dose  <- fix_ci_names(df_dose)
+  df_dose$dose_disp <- 10^df_dose$dose_log10
+  
+  # 4. Standardize Time for Binding
+  if (time_var == "week_numeric") {
+    if ("week_numeric" %in% names(df_ctrl)) df_ctrl$week <- as.factor(df_ctrl$week_numeric)
+    if ("week_numeric" %in% names(df_dose)) df_dose$week <- as.factor(df_dose$week_numeric)
+  }
+  
+  # 5. Combine
+  common_cols <- intersect(names(df_ctrl), names(df_dose))
+  rbind(df_ctrl[, c(common_cols, "dose_disp"), drop = FALSE],
+        df_dose[, c(common_cols, "dose_disp"), drop = FALSE])
+}
+
+# ==============================================================================
+# SLOPE ANALYSIS (Refit-Aware)
+# ==============================================================================
+generate_dose_slopes <- function(model, data) {
+  require(emmeans)
+  
+  vars <- all.vars(stats::formula(model))
+  
+  if (!"dose_log10" %in% vars) {
+    return(list(error = "Model uses discrete 'Dose Factor'. Slopes cannot be calculated."))
+  }
+  
+  # Dynamic Time Variable
+  time_var <- if ("week_numeric" %in% vars) "week_numeric" else "week"
+  
+  # Construct Grid Variables
+  grid_vars <- "chem_treatment"
+  if ("fiber_type" %in% vars) grid_vars <- c(grid_vars, "fiber_type")
+  
+  # Formula construction
+  lhs <- paste(grid_vars, collapse = "+")
+  f_string <- if (time_var %in% vars) paste("~", lhs, "|", time_var) else paste("~", lhs)
+  specs_formula <- stats::as.formula(f_string)
+  
+  # Prepare 'at' list
+  at_list <- list()
+  if (time_var == "week_numeric") {
+    at_list$week_numeric <- sort(unique(data$week_numeric))
+  }
+  
+  tryCatch({
+    trends <- emmeans::emtrends(
+      model, 
+      specs = specs_formula, 
+      var = "dose_log10",
+      data = data,
+      at = if(length(at_list) > 0) at_list else NULL
+    )
+    
+    contrasts <- emmeans::contrast(trends, "pairwise", adjust = "none") 
+    
+    df_slopes <- as.data.frame(trends)
+    df_contrasts <- as.data.frame(contrasts)
+    
+    # Standardize week
+    if (time_var == "week_numeric") {
+      if ("week_numeric" %in% names(df_slopes)) df_slopes$week <- as.factor(df_slopes$week_numeric)
+      if ("week_numeric" %in% names(df_contrasts)) df_contrasts$week <- as.factor(df_contrasts$week_numeric)
+    }
+    
+    list(slopes = df_slopes, comparisons = df_contrasts)
+  }, error = function(e) {
+    return(list(error = paste("Slope Calculation Error:", e$message)))
   })
 }

@@ -183,8 +183,10 @@ build_lmer_formula <- function(include_three_way = TRUE,
                                slope_var = "time_wk_z",
                                slope_group = "tank") {
   base_formula <- "outcome ~ fiber_type * chem_treatment + week + fiber_concentration +
-                   fiber_type:week + chem_treatment:week + is_control * fiber_type + dose_log10"
-  if (isTRUE(include_three_way)) base_formula <- paste(base_formula, "+ fiber_type:chem_treatment:week")
+                   is_control * fiber_type + dose_log10"
+  if (isTRUE(include_three_way)) {
+    base_formula <- paste(base_formula, "+ fiber_type:week + chem_treatment:week + dose_log10:week")
+  }
   if (isTRUE(dose_by_fiber))    base_formula <- paste(base_formula, "+ dose_log10:fiber_type")
   if (isTRUE(dose_by_treat))    base_formula <- paste(base_formula, "+ dose_log10:chem_treatment")
   if (isTRUE(include_recovery)) base_formula <- paste(base_formula, "+ is_recovery + is_recovery:chem_treatment + is_recovery:dose_log10")

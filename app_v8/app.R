@@ -1123,14 +1123,68 @@ ui <- fluidPage(
                 class = "btn-sm btn-warning",
                 icon = icon("image")
               ),
-              h5("Stratified Interaction Analysis (Granular ANOVA)"),
-              helpText("This table breaks down significance by Week and Fiber. Values are P-values."),
+              
+              br(), hr(),
+              
+              # --- NEW SECTION: Granular ANOVA ---
+              h4("Stratified Interaction Analysis (Granular ANOVA)"),
+              helpText("This table breaks down significance by Week. Values are P-values (Green = Significant)."),
               DT::dataTableOutput("lmer_granular_summary"),
+              # NEW: Download button for Granular ANOVA
+              div(style = "margin-top: 5px;",
+                  downloadButton(
+                    "download_lmer_granular_png", 
+                    "Download Granular PNG", 
+                    class = "btn-sm btn-warning", 
+                    icon = icon("image")
+                  )
+              ),
+              
+              br(), hr(),
+              
+              # --- NEW SECTION: Master Comparison Tools ---
+              h4("Multi-Model Comparison"),
+              helpText("Run a model, then click 'Snapshot' to save the results here. Repeat with different filters (e.g., Cotton then PET) to build a master table comparing Fiber and Tissue types."),
+              fluidRow(
+                column(4, actionButton("lmer_add_compare", "Snapshot Current Result", icon = icon("camera"), class = "btn-info")),
+                column(4, actionButton("lmer_clear_compare", "Clear Comparison Table", icon = icon("trash"), class = "btn-danger"))
+              ),
               br(),
-              h5("Estimated Marginal Means"), plotOutput("lmer_emmeans_plot", height = "420px"),
-              DT::dataTableOutput("lmer_emmeans_table"),
-              h5("Pairwise / Custom Contrasts"), DT::dataTableOutput("lmer_pairwise_table"),
-              h5("Model Comparison (lm vs lmer)"), DT::dataTableOutput("model_compare"),
+              DT::dataTableOutput("lmer_comparison_table"),
+              
+              br(), hr(),
+              h5("Post-hoc Comparisons & Visualizations"),
+              tabsetPanel(
+                # --- TAB 1: EM Means (Existing) ---
+                tabPanel("Point Estimates",
+                         br(),
+                         plotOutput("lmer_emmeans_plot", height = "420px"),
+                         DT::dataTableOutput("lmer_emmeans_table")
+                ),
+                
+                # --- TAB 2: NEW Dose-Response ---
+                tabPanel("Dose-Response & Slopes",
+                         br(),
+                         fluidRow(
+                           column(8, 
+                                  h5("Dose-Response Curves"),
+                                  plotOutput("lmer_dose_response_plot", height = "450px"),
+                                  downloadButton("download_lmer_dose_plot", "Download Plot", class = "btn-xs")
+                           ),
+                           column(4,
+                                  h5("Slope Analysis (Trends)"),
+                                  helpText("Tests if the 'rate of toxicity' (slope) is significantly different between groups."),
+                                  DT::dataTableOutput("lmer_slope_table")
+                           )
+                         )
+                ),
+                
+                # --- TAB 3: Pairwise (Existing) ---
+                tabPanel("Pairwise Contrasts",
+                         br(),
+                         DT::dataTableOutput("lmer_pairwise_table")
+                )
+              ),
               # --- Diagnostics (Mixed Effects) ---
               h5("Diagnostics"),
               downloadButton(
@@ -1168,35 +1222,31 @@ ui <- fluidPage(
               wellPanel(
                 h5("Optional: Refit mixed model with adjustments"),
                 fluidRow(
-                  column(
-                    6,
-                    checkboxInput("lmer_refit_log_outcome", "Log-transform outcome (shifted log1p)", FALSE),
-                    checkboxInput("lmer_refit_use_week_spline", "Add spline for numeric week", FALSE),
-                    conditionalPanel(
-                      condition = "input.lmer_refit_use_week_spline",
-                      selectInput(
-                        "lmer_refit_spline_df",
-                        "Spline degrees of freedom",
-                        choices = c(3, 4, 5),
-                        selected = 3
-                      )
-                    ),
-                    checkboxInput("lmer_refit_include_tank_slope", "Include tank time slope (1 + time_wk_z | tank)", TRUE)
+                  column(6,
+                         checkboxInput("lmer_refit_log_outcome", "Log-transform outcome (shifted log1p)", FALSE),
+                         checkboxInput("lmer_refit_use_week_spline", "Add spline for numeric week (df=2)", FALSE),
+                         checkboxInput("lmer_refit_include_tank_slope", "Include tank time slope (1 + time_wk_z | tank)", TRUE)
                   ),
-                  column(
-                    6,
-                    checkboxInput("lmer_refit_include_batch", "Include experiment batch random intercept", TRUE),
-                    checkboxInput("lmer_refit_add_tissue_re", "Add tissue random intercept (1|tissue_type)", FALSE),
-                    checkboxInput("lmer_refit_add_fiber_re", "Add fiber random intercept (1|fiber_type)", FALSE),
-                    checkboxInput("lmer_refit_add_obs_re", "Add observation-level random effect", FALSE)
+                  column(6,
+                         checkboxInput("lmer_refit_include_batch", "Include experiment batch random intercept", TRUE),
+                         checkboxInput("lmer_refit_add_obs_re", "Add observation-level random effect (Fix overdispersion)", FALSE),
+                         helpText("Note: Fiber and Tissue random effects are removed as models are run per-group.")
                   )
                 ),
-                helpText("Select only the adjustments suggested by diagnostics, then refit to compare."),
                 actionButton("run_lmer_refit", "Refit Mixed Model", class = "btn-primary")
               ),
               h5("Refitted Mixed Model Summary"),
               verbatimTextOutput("lmer_refit_summary"),
+              
               h5("Refitted Mixed Model Diagnostics"),
+              # NEW: Download button for Refit Diagnostics
+              downloadButton(
+                "download_lmer_refit_diag_png",
+                "Download Refit Diagnostics PNG",
+                class = "btn-sm btn-warning",
+                icon = icon("image")
+              ),
+              
               tabsetPanel(
                 id = "lmer_refit_diag_tabs",
                 tabPanel("DHARMa residuals", plotOutput("lmer_refit_dharma", height = "380px")),
@@ -3845,42 +3895,114 @@ server <- function(input, output, session) {
            NULL)
   })
   
+  # --- Helper: Generate consistent filenames based on filters ---
+  get_lmer_filename_base <- function() {
+    # 1. Get selections
+    endpoint <- input$lmer_endpoint %||% "UnknownEndpoint"
+    fibers <- paste(input$lmer_fiber_types %||% "UnknownFiber", collapse = "-")
+    
+    # Sample Type Logic
+    if (input$lmer_dataset == "assay") {
+      samples <- paste(input$lmer_sample_types %||% "UnknownSample", collapse = "-")
+    } else if (input$lmer_dataset == "physical" && endpoint == "mf_counts") {
+      samples <- paste(input$lmer_tissue_types %||% "UnknownTissue", collapse = "-")
+    } else {
+      samples <- "AllSamples"
+    }
+    
+    # 2. Clean strings
+    clean_str <- function(x) {
+      x <- tolower(x)
+      x <- gsub("[^a-z0-9]+", "_", x) 
+      x <- gsub("^_+|_+$", "", x)    
+      return(x)
+    }
+    
+    paste(
+      clean_str(endpoint),
+      clean_str(fibers),
+      clean_str(samples),
+      sep = "_"
+    )
+  }
+  
+  # --- 1. Base Model Diagnostics Download ---
   output$download_lmer_diag_png <- downloadHandler(
-    filename = function() paste0(lmer_download_prefix(), "_diag.png"),
+    filename = function() {
+      base_name <- get_lmer_filename_base()
+      # Suffix depends on active tab
+      tab <- input$lmer_diag_tabs %||% "unknown"
+      suffix <- switch(tab,
+                       "DHARMa residuals"       = "diag_dharma.png",
+                       "Residuals vs Fitted"    = "diag_resid_fitted.png",
+                       "Random effects (BLUPs)" = "diag_random_effects.png",
+                       "diag_plot.png" # Fallback
+      )
+      paste(base_name, suffix, sep = "_")
+    },
     content = function(file) {
-      plot_info <- lmer_active_diag_plot()
-      if (is.null(plot_info)) {
-        stop("Select a diagnostics plot to download.")
-      }
+      diag_obj <- lmer_diag()
+      validate(need(!is.null(diag_obj), "Diagnostics not available."))
       
-      if (identical(plot_info$type, "dharma")) {
-        png(
-          file,
-          width = plot_export_settings$width * plot_export_settings$dpi,
-          height = plot_export_settings$height * plot_export_settings$dpi,
-          res = plot_export_settings$dpi
-        )
-        on.exit(grDevices::dev.off(), add = TRUE)
-        graphics::plot(plot_info$object)
-      } else if (identical(plot_info$type, "ggplot")) {
-        ggplot2::ggsave(
-          filename = file,
-          plot = plot_info$plot,
-          device = "png",
-          width = plot_export_settings$width,
-          height = plot_export_settings$height,
-          units = plot_export_settings$units,
-          dpi = plot_export_settings$dpi,
-          bg = "white"
-        )
+      tab <- input$lmer_diag_tabs %||% "DHARMa residuals"
+      
+      # Determine which plot to save
+      if (tab == "DHARMa residuals") {
+        req(diag_obj$sim)
+        png(file, width = 2400, height = 1800, res = 300)
+        graphics::plot(diag_obj$sim)
+        dev.off()
+      } else if (tab == "Residuals vs Fitted") {
+        req(diag_obj$p_res_fit)
+        ggplot2::ggsave(file, plot = diag_obj$p_res_fit, width = 8, height = 6, dpi = 300)
+      } else if (tab == "Random effects (BLUPs)") {
+        req(diag_obj$p_re)
+        ggplot2::ggsave(file, plot = diag_obj$p_re, width = 8, height = 6, dpi = 300)
       } else {
-        stop("Selected diagnostics tab is not downloadable.")
+        stop("The selected tab does not contain a downloadable plot.")
+      }
+    }
+  )
+  
+  # --- 2. Refit Model Diagnostics Download ---
+  output$download_lmer_refit_diag_png <- downloadHandler(
+    filename = function() {
+      base_name <- get_lmer_filename_base()
+      # Append "REFIT" to distinguish from base model
+      tab <- input$lmer_refit_diag_tabs %||% "unknown"
+      suffix <- switch(tab,
+                       "DHARMa residuals"       = "refit_diag_dharma.png",
+                       "Residuals vs Fitted"    = "refit_diag_resid_fitted.png",
+                       "Random effects"         = "refit_diag_random_effects.png",
+                       "refit_diag_plot.png"
+      )
+      paste(base_name, suffix, sep = "_")
+    },
+    content = function(file) {
+      diag_obj <- lmer_refit_diag()
+      validate(need(!is.null(diag_obj), "Refit diagnostics not available."))
+      
+      tab <- input$lmer_refit_diag_tabs %||% "DHARMa residuals"
+      
+      if (tab == "DHARMa residuals") {
+        req(diag_obj$sim)
+        png(file, width = 2400, height = 1800, res = 300)
+        graphics::plot(diag_obj$sim)
+        dev.off()
+      } else if (tab == "Residuals vs Fitted") {
+        req(diag_obj$p_res_fit)
+        ggplot2::ggsave(file, plot = diag_obj$p_res_fit, width = 8, height = 6, dpi = 300)
+      } else if (tab == "Random effects") {
+        req(diag_obj$p_re)
+        ggplot2::ggsave(file, plot = diag_obj$p_re, width = 8, height = 6, dpi = 300)
+      } else {
+        stop("The selected tab does not contain a downloadable plot.")
       }
     }
   )
   
   # ============================================================================
-  # OPTIONAL LMER REFIT DRIVEN BY DIAGNOSTICS
+  # OPTIONAL LMER REFIT (SIMPLIFIED)
   # ============================================================================
   
   lmer_refit_model <- eventReactive(input$run_lmer_refit, {
@@ -3890,110 +4012,110 @@ server <- function(input, output, session) {
     df <- lmer_data_cached()
     validate(need(nrow(df) > 0, "No data available for refit."))
     
-    # Get base formula components
-    full_form   <- stats::formula(base_fit) |> collapse_formula()
-    fixed_part  <- lme4::nobars(full_form) |> collapse_formula()
-    response_nm <- all.vars(update(fixed_part, . ~ 0))[1]
+    # Create numeric week
+    df$week_numeric <- suppressWarnings(as.numeric(as.character(df$week)))
+    
+    # Get base formula string
+    full_form_obj <- stats::formula(base_fit)
+    f_str <- paste(base::deparse(full_form_obj), collapse = " ")
     
     adjust_notes <- character()
     emm_params <- list()
     outcome_transform <- NULL
     
-    # Create numeric week column for spline usage
-    df$week_numeric <- suppressWarnings(as.numeric(as.character(df$week)))
-    
     # --- 1. Log Transform ---
+    response_nm <- all.vars(full_form_obj)[1]
+    
     if (isTRUE(input$lmer_refit_log_outcome)) {
       y <- df[[response_nm]]
       finite_y <- is.finite(y)
       if (!any(finite_y)) {
-        showNotification("Log transform skipped: no finite outcome values.", type = "warning", duration = 6)
+        showNotification("Log transform skipped: no finite outcome values.", type = "warning")
       } else {
         min_val <- min(y[finite_y], na.rm = TRUE)
-        # Shift to ensure positive values (e.g. log(y + 0.1)) if min <= 0
         shift <- if (is.finite(min_val) && min_val <= 0) abs(min_val) + 0.1 else 0
         df[[response_nm]] <- log1p(y + shift)
-        
         adjust_notes <- c(adjust_notes, sprintf("Applied log1p transform with %.2f shift.", shift))
         outcome_transform <- list(type = "shifted_log1p", shift = shift, response = response_nm)
       }
     }
     
-    # --- 2. Week Spline ---
+    # --- 2. Week Spline (Hardcoded df=2) ---
     if (isTRUE(input$lmer_refit_use_week_spline)) {
       if (any(is.finite(df$week_numeric))) {
-        spline_df <- as.integer(input$lmer_refit_spline_df %||% 3)
+        # Check for enough points
+        n_time_points <- dplyr::n_distinct(df$week_numeric)
         
-        # CRITICAL FIX: Remove the factor 'week' when adding the numeric spline
-        # This prevents rank deficiency/singularity caused by having both versions of 'week'
-        fixed_part <- update(fixed_part, . ~ . - week + splines::ns(week_numeric, spline_df))
+        # df=2 is max for 3 points. If < 3 points, use df=1 (linear)
+        real_df <- if (n_time_points >= 3) 2 else 1
         
-        emm_params$spline_df <- spline_df
-        adjust_notes <- c(adjust_notes, sprintf("Replaced factor 'week' with natural spline (df = %d).", spline_df))
+        emm_params$spline_df <- real_df
+        
+        # Replace 'week' with 'week_numeric' GLOBALLY
+        f_str <- gsub("\\bweek\\b", "week_numeric", f_str)
+        
+        # Add spline term
+        f_str <- paste(f_str, "+ splines::ns(week_numeric, df =", real_df, ")")
+        
+        adjust_notes <- c(adjust_notes, sprintf("Replaced factor 'week' with numeric spline (df=%d).", real_df))
       } else {
-        showNotification("Spline skipped: numeric week is not available.", type = "warning", duration = 6)
+        showNotification("Spline skipped: numeric week not available.", type = "warning")
       }
     }
     
-    # --- 3. Build Random Effects ---
+    # --- 3. Random Effects (Simplified) ---
+    # Extract fixed part only
+    temp_form <- stats::as.formula(f_str)
+    fixed_only <- lme4::nobars(temp_form)
+    f_fixed_str <- paste(base::deparse(fixed_only), collapse = " ")
+    
     random_terms <- character()
+    add_re <- function(term) random_terms <<- c(random_terms, term)
     
-    add_random_term <- function(term, column = NULL, min_levels = 2) {
-      if (!is.null(column)) {
-        if (!column %in% names(df)) return(FALSE)
-        n_levels <- dplyr::n_distinct(stats::na.omit(df[[column]]))
-        if (n_levels < min_levels) return(FALSE)
-      }
-      random_terms <<- c(random_terms, term)
-      TRUE
-    }
-    
-    # Tank slope/intercept logic
+    # Tank RE (Main hierarchy)
     slope_ok <- isTRUE(input$lmer_refit_include_tank_slope) &&
       ("time_wk_z" %in% names(df)) &&
       isTRUE(stats::sd(df$time_wk_z, na.rm = TRUE) > 0)
     
-    tank_term <- if (slope_ok) "(1 + time_wk_z | tank)" else "(1 | tank)"
-    add_random_term(tank_term, "tank")
-    
-    if (isTRUE(input$lmer_refit_include_batch)) add_random_term("(1 | experiment_batch)", "experiment_batch")
-    if (isTRUE(input$lmer_refit_add_tissue_re)) add_random_term("(1 | tissue_type)", "tissue_type")
-    if (isTRUE(input$lmer_refit_add_fiber_re)) add_random_term("(1 | fiber_type)", "fiber_type")
-    if (isTRUE(input$lmer_refit_add_obs_re)) {
-      df$obs_refit_id <- factor(seq_len(nrow(df)))
-      add_random_term("(1 | obs_refit_id)")
+    if (dplyr::n_distinct(df$tank) >= 2) {
+      tank_term <- if (slope_ok) "(1 + time_wk_z | tank)" else "(1 | tank)"
+      add_re(tank_term)
     }
     
-    validate(need(length(random_terms) > 0, "No random effects specified for refit."))
+    # Batch RE (Optional)
+    if (isTRUE(input$lmer_refit_include_batch)) {
+      if (dplyr::n_distinct(df$experiment_batch) >= 2) {
+        add_re("(1 | experiment_batch)")
+      }
+    }
     
-    # Combine formulas
-    fixed_chr <- paste(base::deparse(fixed_part), collapse = " ")
-    rand_chr  <- paste(random_terms, collapse = " + ")
-    final_form <- stats::as.formula(paste(fixed_chr, "+", rand_chr))
+    # Observation Level RE
+    if (isTRUE(input$lmer_refit_add_obs_re)) {
+      df$obs_refit_id <- factor(seq_len(nrow(df)))
+      add_re("(1 | obs_refit_id)")
+    }
     
-    # Fit Model
+    if (length(random_terms) == 0) {
+      validate(need(FALSE, "Refit aborted: No valid random effects found (insufficient levels)."))
+    }
+    
+    final_form <- stats::as.formula(paste(f_fixed_str, "+", paste(random_terms, collapse = " + ")))
+    
+    # Fit
     fit_obj <- tryCatch(
       lme4::lmer(final_form, data = df,
-                 control = lme4::lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 40000))
-      ),
+                 control = lme4::lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 40000))),
       error = function(e) {
-        showNotification(sprintf("Refit failed: %s", conditionMessage(e)), type = "error", duration = 8)
+        showNotification(paste("Refit failed:", e$message), type = "error")
         stop(e)
       }
     )
     
-    # Pack results
     attr(fit_obj, "data_used") <- df
     emm_params$outcome_transform <- outcome_transform
     attr(fit_obj, "emm_params") <- emm_params
     
-    list(
-      model = fit_obj, 
-      formula = final_form, 
-      notes = adjust_notes, 
-      data = df,            # CRITICAL: Return the modified dataframe
-      params = emm_params
-    )
+    list(model = fit_obj, formula = final_form, notes = adjust_notes, data = df, params = emm_params)
   })
   
   lmer_refit_diag <- reactive({
@@ -4037,23 +4159,39 @@ server <- function(input, output, session) {
       DT::formatRound("value", 6)
   })
   
-  # Helper: robustly select between Refit and Base models
+  # ============================================================================
+  # MODEL SELECTION LOGIC (Fixes the "Stuck on Refit" bug)
+  # ============================================================================
+  
+  # Track which model was run most recently
+  model_state <- reactiveValues(current = "base")
+  
+  observeEvent(input$run_lmer, {
+    model_state$current <- "base"
+  })
+  
+  observeEvent(input$run_lmer_refit, {
+    model_state$current <- "refit"
+  })
+  
+  # Helper: Select the correct model based on user's last action
   active_lmer_model <- reactive({
-    # 1. Try to get the refit object
-    refit_obj <- tryCatch(lmer_refit_model(), error = function(e) NULL)
     
-    # 2. If refit exists and is a valid model, use it
-    # Note: lmer returns class "lmerMod" which inherits from "merMod"
-    if (!is.null(refit_obj) && !is.null(refit_obj$model) && inherits(refit_obj$model, "merMod")) {
-      return(list(
-        model  = refit_obj$model,
-        source = "refit",
-        data   = refit_obj$data,    # Use the data WITH week_numeric/log-outcome
-        params = refit_obj$params
-      ))
+    # 1. If user last clicked "Refit", try to serve the refit model
+    if (model_state$current == "refit") {
+      refit_obj <- tryCatch(lmer_refit_model(), error = function(e) NULL)
+      
+      if (!is.null(refit_obj) && !is.null(refit_obj$model)) {
+        return(list(
+          model  = refit_obj$model,
+          source = "refit",
+          data   = refit_obj$data,
+          params = refit_obj$params
+        ))
+      }
     }
     
-    # 3. Otherwise, fall back to the base model
+    # 2. Otherwise (or if refit failed), serve the Base model
     base_fit <- tryCatch(lmer_model(), error = function(e) NULL)
     validate(need(!is.null(base_fit) && inherits(base_fit, "merMod"), "No valid mixed model found."))
     
@@ -4314,53 +4452,327 @@ server <- function(input, output, session) {
     )
   })
   
-  # ----------------------------------------------------------------------
-  # GRANULAR ANOVA OUTPUT
-  # ----------------------------------------------------------------------
+  # ==============================================================================
+  # GRANULAR ANOVA & MASTER COMPARISON LOGIC
+  # ==============================================================================
+  
+  # 1. Initialize a container to store results from different runs
+  comparison_store <- reactiveValues(summary_table = NULL)
+  
+  # 2. Render the "Live" Granular ANOVA (Numeric for Green Coloring)
   output$lmer_granular_summary <- DT::renderDataTable({
-    # 1. Get the active model (handles base vs refit logic automatically)
     fit_list <- active_lmer_model()
     validate(need(!is.null(fit_list$model), "Run Mixed Model first."))
     
-    # 2. Generate the summary
+    # Generate numeric table for styling
     df_summary <- generate_granular_anova(
       model = fit_list$model, 
-      data  = fit_list$data
+      data  = fit_list$data, 
+      return_format = "numeric"
     )
     
-    # 3. Identify Week columns dynamically for styling
-    week_cols <- grep("Week", names(df_summary), value = TRUE)
+    # Identify Week columns for styling
+    p_cols <- grep("Week", names(df_summary), value = TRUE)
     
-    # 4. Render with conditional formatting
     DT::datatable(
       df_summary,
-      options = list(
-        dom = 't', # Simple table, no search/pagination
-        scrollX = TRUE,
-        pageLength = 20
-      ),
+      options = list(dom = 't', scrollX = TRUE, pageLength = 20),
       rownames = FALSE,
-      caption = "P-values for fixed effects (Treatment, Concentration) tested within each Fiber and Week."
+      caption = "P-values for effects within each Week. (Green = Significant)"
     ) %>%
-      # Round P-values
-      DT::formatRound(columns = week_cols, digits = 4) %>%
-      # Apply color scale: Green for significant (< 0.05), darker green for highly significant
+      DT::formatRound(columns = p_cols, digits = 4) %>%
       DT::formatStyle(
-        columns = week_cols,
+        columns = p_cols,
         backgroundColor = DT::styleInterval(
           cuts = c(0.001, 0.01, 0.05),
-          values = c("#a5d6a7", "#c8e6c9", "#e8f5e9", "white") # Dark Green -> Light Green -> White
+          values = c("#a5d6a7", "#c8e6c9", "#e8f5e9", "white") 
         ),
-        fontWeight = DT::styleInterval(
-          cuts = c(0.05),
-          values = c("bold", "normal")
-        ),
-        color = DT::styleInterval(
-          cuts = c(0.05),
-          values = c("black", "#cccccc") # Dim non-significant results
-        )
+        fontWeight = DT::styleInterval(0.05, c("bold", "normal")),
+        color = DT::styleInterval(0.05, c("black", "#aaaaaa"))
       )
   })
+  
+  # 3. NEW: Download Handler for Granular ANOVA PNG
+  output$download_lmer_granular_png <- downloadHandler(
+    filename = function() {
+      paste0(lmer_download_prefix(), "_granular_anova.png")
+    },
+    content = function(file) {
+      fit_list <- active_lmer_model()
+      req(fit_list$model)
+      
+      # Get numeric data for the static image
+      df <- generate_granular_anova(fit_list$model, fit_list$data, return_format = "numeric")
+      
+      # Identify week columns dynamically
+      week_cols <- grep("Week", names(df), value = TRUE)
+      
+      # Create GT object
+      gt_tbl <- gt::gt(df) %>%
+        gt::fmt_number(
+          columns = dplyr::all_of(week_cols),
+          decimals = 4
+        ) %>%
+        gt::tab_header(
+          title = "Stratified Interaction Analysis",
+          subtitle = "Significance (P-value) by Timepoint"
+        )
+      
+      # Apply 3-tier color scaling (mimicking the DT table)
+      # < 0.001
+      for(col in week_cols) {
+        gt_tbl <- gt_tbl %>%
+          gt::tab_style(
+            style = list(gt::cell_fill(color = "#a5d6a7"), gt::cell_text(weight = "bold")),
+            locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] < 0.001)
+          ) %>%
+          # < 0.01
+          gt::tab_style(
+            style = list(gt::cell_fill(color = "#c8e6c9"), gt::cell_text(weight = "bold")),
+            locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] >= 0.001 & .data[[col]] < 0.01)
+          ) %>%
+          # < 0.05
+          gt::tab_style(
+            style = list(gt::cell_fill(color = "#e8f5e9")),
+            locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] >= 0.01 & .data[[col]] < 0.05)
+          ) %>%
+          # Non-significant (dimmed)
+          gt::tab_style(
+            style = gt::cell_text(color = "#aaaaaa"),
+            locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] >= 0.05)
+          )
+      }
+      
+      # Save
+      gt::gtsave(gt_tbl, filename = file)
+    },
+    contentType = "image/png"
+  )
+  
+  # 4. Observer: "Add to Comparison" Button (Snapshot)
+  observeEvent(input$lmer_add_compare, {
+    fit_list <- active_lmer_model()
+    req(fit_list$model)
+    
+    # Generate detailed string version (P + F ratio) for the master table
+    current_res <- generate_granular_anova(
+      model = fit_list$model, 
+      data  = fit_list$data,
+      return_format = "composite" 
+    )
+    
+    # Check for calculation errors returned as dataframe
+    if ("Error" %in% names(current_res)) {
+      showNotification(paste("Cannot add to comparison:", current_res$Error[1]), type = "error")
+      return()
+    }
+    
+    # Add to storage
+    if (is.null(comparison_store$summary_table)) {
+      comparison_store$summary_table <- current_res
+    } else {
+      # Bind rows and remove exact duplicates to avoid clutter
+      comparison_store$summary_table <- dplyr::bind_rows(
+        comparison_store$summary_table, 
+        current_res
+      ) %>% dplyr::distinct()
+    }
+    
+    showNotification("Result added to comparison table below!", type = "message")
+  })
+  
+  # 5. Observer: "Clear" Button
+  observeEvent(input$lmer_clear_compare, {
+    comparison_store$summary_table <- NULL
+  })
+  
+  # 6. Render the Master Comparison Table
+  output$lmer_comparison_table <- DT::renderDataTable({
+    req(comparison_store$summary_table)
+    
+    DT::datatable(
+      comparison_store$summary_table,
+      options = list(
+        dom = 'Bfrtip', 
+        pageLength = 50,
+        scrollX = TRUE,
+        buttons = c('copy', 'csv', 'excel')
+      ),
+      rownames = FALSE,
+      caption = "Master Summary: Comparison of effects across different model runs (Snapshots)."
+    )
+  })
+  
+  # ==============================================================================
+  # DOSE-RESPONSE & SLOPE ANALYSIS
+  # ==============================================================================
+  
+  # 1. Render Dose-Response Plot
+  output$lmer_dose_response_plot <- renderPlot({
+    fit_list <- active_lmer_model()
+    req(fit_list$model)
+    
+    df_plot <- tryCatch(
+      generate_dose_response_data(fit_list$model, fit_list$data),
+      error = function(e) { print(e); NULL }
+    )
+    
+    validate(need(!is.null(df_plot), "Could not generate dose-response data."))
+    validate(need("dose_disp" %in% names(df_plot), "Data missing 'dose_disp' column."))
+    
+    # Dynamic Faceting
+    facet_cols <- c()
+    # Check for 'week' (which our helper now ensures exists even for spline refits)
+    if ("week" %in% names(df_plot)) facet_cols <- c(facet_cols, "week")
+    if ("fiber_type" %in% names(df_plot)) facet_cols <- c(facet_cols, "fiber_type")
+    
+    facet_formula <- if(length(facet_cols) > 0) {
+      stats::as.formula(paste("~", paste(facet_cols, collapse="+")))
+    } else {
+      NULL
+    }
+    
+    p <- ggplot(df_plot, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment, group = chem_treatment)) +
+      geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2, alpha = 0.5) +
+      geom_line(linewidth = 1) +
+      geom_point(size = 3) +
+      scale_color_manual(values = get_treatment_palette()) +
+      theme_publication() +
+      labs(
+        title = "Dose-Response Analysis",
+        subtitle = "Estimated means across concentrations.",
+        x = "Fiber Concentration (mf/L)",
+        y = "Model Estimated Outcome",
+        color = "Treatment"
+      )
+    
+    if (!is.null(facet_formula)) {
+      p <- p + facet_grid(facet_formula, labeller = label_both)
+    }
+    
+    p
+  })
+  
+  # 2. Render Slope Comparison Table
+  output$lmer_slope_table <- DT::renderDataTable({
+    fit_list <- active_lmer_model()
+    req(fit_list$model)
+    
+    # FIXED: Pass both model AND data
+    res <- generate_dose_slopes(fit_list$model, fit_list$data)
+    
+    if (!is.null(res$error)) {
+      return(DT::datatable(data.frame(Message = res$error), rownames=FALSE, options=list(dom='t')))
+    }
+    
+    # Format Table
+    df <- res$comparisons %>%
+      dplyr::mutate(
+        p_val_fmt = format.pval(p.value, digits=3, eps=0.001),
+        sig = ifelse(p.value < 0.05, "Yes", "No")
+      ) %>%
+      dplyr::select(-df, -t.ratio) # Simplify columns
+    
+    DT::datatable(
+      df, 
+      options = list(dom = 't', scrollX = TRUE),
+      rownames = FALSE,
+      caption = "Comparison of Slopes (Sensitivity): Does the dose-response rate differ between treatments?"
+    ) %>%
+      DT::formatRound(columns = c("estimate", "SE"), digits = 4) %>%
+      DT::formatStyle("p.value", 
+                      backgroundColor = DT::styleInterval(0.05, c("#c8e6c9", "white")))
+  })
+  
+  # 3. Download Handler for Dose-Response Plot (Updated Naming)
+  output$download_lmer_dose_plot <- downloadHandler(
+    filename = function() {
+      # 1. Get selections from input (safe fallback to "Unknown")
+      endpoint <- input$lmer_endpoint %||% "UnknownEndpoint"
+      
+      # Fiber: Get selected, collapse multiple if needed
+      fibers <- paste(input$lmer_fiber_types %||% "UnknownFiber", collapse = "-")
+      
+      # Sample Type: Logic depends on dataset type
+      if (input$lmer_dataset == "assay") {
+        samples <- paste(input$lmer_sample_types %||% "UnknownSample", collapse = "-")
+      } else if (input$lmer_dataset == "physical" && endpoint == "mf_counts") {
+        samples <- paste(input$lmer_tissue_types %||% "UnknownTissue", collapse = "-")
+      } else {
+        samples <- "AllSamples"
+      }
+      
+      # 2. Clean strings (remove spaces, make safe for filename)
+      clean_str <- function(x) {
+        x <- tolower(x)
+        x <- gsub("[^a-z0-9]+", "_", x) # Replace non-alphanumeric with underscore
+        x <- gsub("^_+|_+$", "", x)     # Trim leading/trailing underscores
+        return(x)
+      }
+      
+      fname <- paste(
+        clean_str(endpoint),
+        clean_str(fibers),
+        clean_str(samples),
+        "doseplot.png",
+        sep = "_"
+      )
+      
+      return(fname)
+    },
+    content = function(file) {
+      # Re-create plot logic for download (must be identical to renderPlot above)
+      fit_list <- active_lmer_model()
+      req(fit_list$model)
+      
+      df_plot <- tryCatch(
+        generate_dose_response_data(fit_list$model, fit_list$data),
+        error = function(e) NULL
+      )
+      validate(need(!is.null(df_plot), "No plot data"))
+      
+      # Facet logic
+      facet_cols <- c()
+      if ("week" %in% names(df_plot)) facet_cols <- c(facet_cols, "week")
+      if ("fiber_type" %in% names(df_plot)) facet_cols <- c(facet_cols, "fiber_type")
+      
+      facet_formula <- if(length(facet_cols) > 0) {
+        stats::as.formula(paste("~", paste(facet_cols, collapse="+")))
+      } else {
+        NULL
+      }
+      
+      p <- ggplot(df_plot, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment, group = chem_treatment)) +
+        geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2, alpha = 0.5) +
+        geom_line(linewidth = 1) +
+        geom_point(size = 3) +
+        scale_color_manual(values = get_treatment_palette()) +
+        theme_publication() +
+        labs(
+          title = "Dose-Response Analysis",
+          subtitle = "Estimated means across concentrations.",
+          x = "Fiber Concentration (mf/L)",
+          y = "Model Estimated Outcome",
+          color = "Treatment"
+        )
+      
+      if (!is.null(facet_formula)) {
+        p <- p + facet_grid(facet_formula, labeller = label_both)
+      }
+      
+      # Save using ggsave (Standard settings)
+      ggplot2::ggsave(
+        filename = file,
+        plot = p,
+        device = "png",
+        width = 8,
+        height = 6,
+        units = "in",
+        dpi = 300,
+        bg = "white"
+      )
+    }
+  )
   
   # ============================================================================
   # LINEAR TRENDS ANALYSIS - SERVER CODE (OPTION 2: REFIT WITH NUMERIC WEEK)
@@ -5642,37 +6054,28 @@ server <- function(input, output, session) {
         validate(need(!is.null(mdl), "No model available for EMMeans."))
         
         # --- 1. Analyze Model Variables ---
+        # Check what variables are actually in the formula
         model_vars <- tryCatch(all.vars(stats::formula(mdl)), error = function(e) character(0))
         
-        # Keep helper columns present for EMMeans grid construction even after
-        # refits that swap factor week for splines or transform the response.
-        # This prevents "undefined columns selected" errors when emmeans looks
-        # for the raw covariates.
-        if (!"week_numeric" %in% names(emm_data) && "week" %in% names(emm_data)) {
-          emm_data$week_numeric <- suppressWarnings(as.numeric(as.character(emm_data$week)))
-        }
+        # Detect Time Variable (Factor 'week' vs Spline 'week_numeric')
+        time_var <- if ("week_numeric" %in% model_vars) "week_numeric" else "week"
         
-        # Record which variables emmeans will need so we can validate early
-        requested <- as.character(input$lmer_emmeans_by %||% "treatment")
-        spec_vars <- character()
-        
-        # --- 2. Build 'at' list for Doses and Weeks ---
+        # --- 2. Build 'at' list ---
         at_list <- list()
         
-        # A) Handle Dose (Factor vs Numeric)
+        # A) Handle Dose
         selected_dose <- as.character(input$lmer_emmeans_dose %||% "0")
         
         if ("dose_factor" %in% model_vars) {
-          # If treating dose as factor, pick the specific level
+          # Factor dose
           if (!is.null(emm_data) && "dose_factor" %in% names(emm_data)) {
             if (!selected_dose %in% levels(emm_data$dose_factor)) {
               selected_dose <- levels(emm_data$dose_factor)[1]
             }
           }
           at_list$dose_factor <- selected_dose
-          
         } else if ("dose_log10" %in% model_vars) {
-          # If treating dose as numeric log10
+          # Numeric dose
           if (identical(selected_dose, "0")) {
             at_list$dose_log10 <- 0
             if ("is_control" %in% model_vars) at_list$is_control <- 1
@@ -5684,50 +6087,38 @@ server <- function(input, output, session) {
           }
         }
         
-        # B) Handle Weeks (Factor vs Numeric Spline)
-        # If we refitted with a spline, 'week' (factor) is gone, replaced by 'week_numeric'
-        if ("week_numeric" %in% model_vars && !("week" %in% model_vars)) {
-          # We must tell emmeans which numeric weeks to calculate estimates for.
-          # We'll use the unique integer weeks found in the data (e.g., 1, 3, 5)
+        # B) Handle Time (Crucial for Spline Refit)
+        # If using spline, we must specify points, otherwise emmeans averages to a single number
+        if (time_var == "week_numeric") {
+          # Predict at integer weeks (1, 3, 5) present in data
           if (!is.null(emm_data) && "week_numeric" %in% names(emm_data)) {
             at_list$week_numeric <- sort(unique(emm_data$week_numeric))
           }
         }
         
         # --- 3. Build Specs ---
-        # Logic to swap 'week' for 'week_numeric' in specifications if needed
-        if (grepl("week", requested) && !("week" %in% model_vars) && "week_numeric" %in% model_vars) {
-          # Map user request (e.g. "treatment_week") to numeric equivalent
+        requested <- as.character(input$lmer_emmeans_by %||% "treatment")
+        
+        # If user asks for "week" but model has "week_numeric", swap it
+        if (grepl("week", requested) && time_var == "week_numeric") {
+          # Replace 'week' with 'week_numeric' in the request string logic
+          # e.g. "treatment_week" -> treatment + week_numeric
           target_spec <- switch(requested,
-                                "week" = ~ week_numeric,
-                                "treatment_week" = ~ chem_treatment | week_numeric,
-                                "fiber_week" = ~ fiber_type | week_numeric,
+                                "week"             = ~ week_numeric,
+                                "treatment_week"   = ~ chem_treatment | week_numeric,
+                                "fiber_week"       = ~ fiber_type | week_numeric,
                                 "all_interactions" = ~ chem_treatment | fiber_type + week_numeric,
-                                # Fallback to safe default
-                                ~ chem_treatment
+                                ~ chem_treatment # fallback
           )
           emm_specs <- target_spec
-          spec_vars <- all.vars(emm_specs)
         } else {
+          # Standard behavior
           emm_specs <- make_safe_emm_specs(requested, mdl)
-          spec_vars <- all.vars(emm_specs)
         }
         
-        # Validate that all variables referenced by specs/at are actually in the
-        # data passed to emmeans. This keeps refit-specific columns (e.g.,
-        # week_numeric) in sync and surfaces a clear message instead of a silent
-        # plot failure.
-        needed_vars <- unique(c(names(at_list), spec_vars))
-        missing_vars <- setdiff(needed_vars, names(emm_data))
-        validate(need(length(missing_vars) == 0,
-                      paste("EMMeans requires the following columns in the refit data:",
-                            paste(missing_vars, collapse = ", "))))
-        
         # --- 4. Run EMMeans ---
-        # CRITICAL: Pass 'data = emm_data' explicitly!
-        # Without this, emmeans cannot find the 'week_numeric' or transformed columns.
+        # Explicitly pass data and params
         args <- list(object = mdl, specs = emm_specs, data = emm_data)
-        
         if (length(at_list) > 0) args$at <- at_list
         if (!is.null(emm_params) && length(emm_params) > 0) args$params <- emm_params
         
@@ -5737,7 +6128,7 @@ server <- function(input, output, session) {
         emm_tbl <- as.data.frame(summary(emm, infer = TRUE))
         emm_tbl <- standardize_emm_columns(emm_tbl)
         
-        # If we have week_numeric but want to plot it cleanly, coerce to factor for the table
+        # Re-create 'week' factor for plotting if we used numeric
         if ("week_numeric" %in% names(emm_tbl) && !"week" %in% names(emm_tbl)) {
           emm_tbl$week <- as.factor(emm_tbl$week_numeric)
         }
@@ -5751,7 +6142,8 @@ server <- function(input, output, session) {
           emmeans_df = bt$data,
           emmeans_plot_df = dplyr::filter(bt$data, is.finite(emmean)),
           source = active_fit$source,
-          transform_note = bt$note
+          transform_note = bt$note,
+          error = NULL
         )
         
       }, error = function(e) {
