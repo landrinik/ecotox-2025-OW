@@ -3263,7 +3263,7 @@ server <- function(input, output, session) {
   })
   
   # -----------------------------------------------------------------------------
-  # Mixed Effects: model-ready data using UI shim (works for assay and physical)
+  # Mixed Effects: model-ready data (Fixed: dose_factor created early)
   # -----------------------------------------------------------------------------
   lmer_data_cached <- reactive({
     validate(
@@ -3272,125 +3272,93 @@ server <- function(input, output, session) {
     )
     
     ds <- tolower(as.character(input$lmer_dataset))
+    
+    # 1. Load Base Data & Select Endpoint
     if (identical(ds, "assay")) {
       validate(need(exists("final_data") && is.data.frame(final_data) && nrow(final_data) > 0, "No assay data loaded."))
+      
       df <- final_data %>%
         dplyr::rename(endpoint_ui = assay_type) %>%
-        dplyr::filter(.data$endpoint_ui == input$lmer_endpoint)
-      outcome_col <- "calculated_concentration"
+        dplyr::filter(.data$endpoint_ui == input$lmer_endpoint) %>%
+        dplyr::mutate(outcome = calculated_concentration)
+      
+      if (!is.null(input$lmer_sample_types) && length(input$lmer_sample_types)) {
+        df <- df %>% dplyr::filter(tolower(sample_type) %in% tolower(input$lmer_sample_types))
+      }
+      
     } else if (identical(ds, "physical")) {
       validate(need(exists("physical_master") && is.data.frame(physical_master) && nrow(physical_master) > 0, "No physical data loaded."))
+      
       df <- physical_master %>%
         dplyr::rename(endpoint_ui = endpoint) %>%
-        dplyr::filter(.data$endpoint_ui == input$lmer_endpoint)
-      outcome_col <- "value"
+        dplyr::filter(.data$endpoint_ui == input$lmer_endpoint) %>%
+        dplyr::mutate(outcome = value)
+      
+      # Extraction of tank from sample (Physical only)
+      if ("sample" %in% names(df)) {
+        df$tank <- stringr::str_extract(as.character(df$sample), "^[0-9]+")
+      }
+      
+      if (identical(input$lmer_endpoint, "mf_counts") &&
+          !is.null(input$lmer_tissue_types) && length(input$lmer_tissue_types)) {
+        df <- df %>% dplyr::filter(tolower(tissue_type) %in% tolower(input$lmer_tissue_types))
+      }
     } else {
       validate(need(FALSE, sprintf("Unknown dataset tag: %s", ds)))
     }
     
-    # Normalize key fields (tank, experiment_batch, week, factors, etc.)
-    df <- normalize_categories_for_lmer(df)
-    
-    # Apply Mixed Effects UI filters
-    to_lower <- function(x) if (is.null(x)) character(0) else tolower(as.character(x))
-    if (!is.null(input$lmer_sample_types) && length(input$lmer_sample_types)) {
-      df <- dplyr::filter(df, sample_type %in% to_lower(input$lmer_sample_types))
-    }
-    if (!is.null(input$lmer_fiber_types) && length(input$lmer_fiber_types)) {
-      df <- dplyr::filter(df, fiber_type %in% to_lower(input$lmer_fiber_types))
-    }
-    if (!is.null(input$lmer_treatments) && length(input$lmer_treatments)) {
-      df <- dplyr::filter(df, chem_treatment %in% to_lower(input$lmer_treatments))
-    }
-    if (!is.null(input$lmer_weeks_include) && length(input$lmer_weeks_include)) {
-      df <- dplyr::filter(df, as.character(week) %in% as.character(input$lmer_weeks_include))
-    }
-    if (!is.null(input$lmer_concentrations) && length(input$lmer_concentrations)) {
-      df <- dplyr::filter(df, as.character(fiber_concentration) %in% as.character(input$lmer_concentrations))
-    }
-    if (identical(ds, "physical") && identical(input$lmer_endpoint, "mf_counts") &&
-        !is.null(input$lmer_tissue_types) && length(input$lmer_tissue_types)) {
-      df <- dplyr::filter(df, tissue_type %in% to_lower(input$lmer_tissue_types))
-    }
-    
-    # ---- SAFE Harmonization of experiment_batch and tank ----
-    safe_col <- function(d, col_name) {
-      if (col_name %in% names(d)) as.character(d[[col_name]]) else rep(NA_character_, nrow(d))
-    }
-    cand_batch <- list(
-      safe_col(df, "experiment_batch"),
-      safe_col(df, "batch"),
-      safe_col(df, "batch_id"),
-      safe_col(df, "experiment"),
-      safe_col(df, "experiment_id"),
-      safe_col(df, "exp_batch"),
-      safe_col(df, "exp")
-    )
-    df$experiment_batch <- dplyr::coalesce(!!!cand_batch)
-    df$experiment_batch <- ifelse(is.na(df$experiment_batch), NA_character_, trimws(tolower(df$experiment_batch)))
-    
-    # Derive experiment_batch from fiber_type when missing
-    batch_raw <- df$experiment_batch
-    missing_batch <- is.na(batch_raw) | (!is.na(batch_raw) & !nzchar(batch_raw))
-    
-    # FIX: Ensure batch_raw is treated as character to avoid "logical vs character" error in case_when
-    batch_raw <- as.character(batch_raw)
-    
-    df$experiment_batch <- dplyr::case_when(
-      !missing_batch ~ batch_raw,
-      !is.na(df$fiber_type) & df$fiber_type == "cotton" ~ "experiment_cotton",
-      !is.na(df$fiber_type) & df$fiber_type == "pet" ~ "experiment_pet",
-      TRUE ~ NA_character_
-    )
-    
-    derived_batches <- sum(missing_batch & !is.na(df$experiment_batch))
-    if (derived_batches > 0) {
-      message(sprintf("[lmer-data] filled %d experiment_batch values based on fiber_type.", derived_batches))
-    }
-    
-    df$experiment_batch <- ifelse(is.na(df$experiment_batch), NA_character_, df$experiment_batch)
-    df$tank <- if ("tank" %in% names(df)) trimws(tolower(as.character(df$tank))) else NA_character_
-    
-    # Availability log and gentle notice
-    n_tank  <- if ("tank" %in% names(df)) dplyr::n_distinct(stats::na.omit(df$tank)) else 0L
-    n_batch <- if ("experiment_batch" %in% names(df)) dplyr::n_distinct(stats::na.omit(df$experiment_batch)) else 0L
-    message(sprintf("[lmer-data] groups seen post-normalize: tank=%d, batch=%d", n_tank, n_batch))
-    if (n_batch < 2L) {
-      showNotification(
-        "experiment_batch missing or has < 2 distinct levels after filters; model will omit batch.",
-        type = "message", duration = 6
-      )
-    }
-    
-    # Ensure 'time_wk' (numeric) and 'time_wk_z' (centered within tank) exist for random slope
+    # 2. Standardize Columns & Create dose_factor EARLY
+    #    This ensures 'dose_factor' exists before any downstream code looks for it.
     df <- df %>%
-      dplyr::mutate(time_wk = suppressWarnings(as.numeric(week))) %>%
-      dplyr::group_by(tank) %>%
+      create_enhanced_treatment_categories() %>%
+      normalize_controls_and_dose() %>%
+      create_experiment_batch() %>%
       dplyr::mutate(
-        time_wk_z = ifelse(
-          is.finite(time_wk),
-          time_wk - mean(time_wk, na.rm = TRUE),
-          NA_real_
-        )
-      ) %>%
-      dplyr::ungroup()
-    
-    # Create dose encodings and numeric outcome BEFORE finite filter
-    validate(need(outcome_col %in% names(df), sprintf("Column '%s' not found in selected data.", outcome_col)))
-    df <- df %>%
-      dplyr::mutate(
+        # Explicitly create dose_factor here to prevent "Unknown column" warnings later
         dose_factor = factor(fiber_concentration, levels = c("0", "100", "1000", "10000"), ordered = TRUE),
         is_control  = dplyr::if_else(fiber_concentration %in% c("0","control","ctrl"), 1L, 0L, missing = 0L),
         dose_log10  = dplyr::case_when(
           fiber_concentration %in% c("0","control","ctrl") ~ 0,
           TRUE ~ log10(suppressWarnings(as.numeric(fiber_concentration)))
-        ),
-        outcome = suppressWarnings(as.numeric(.data[[outcome_col]]))
+        )
+      )
+    
+    # 3. Apply Common Filters
+    if (!is.null(input$lmer_fiber_types) && length(input$lmer_fiber_types)) {
+      df <- df %>% dplyr::filter(tolower(fiber_type) %in% tolower(input$lmer_fiber_types))
+    }
+    if (!is.null(input$lmer_treatments) && length(input$lmer_treatments)) {
+      df <- df %>% dplyr::filter(tolower(chem_treatment) %in% tolower(input$lmer_treatments))
+    }
+    if (!is.null(input$lmer_weeks_include) && length(input$lmer_weeks_include)) {
+      df <- df %>% dplyr::filter(as.character(week) %in% as.character(input$lmer_weeks_include))
+    }
+    if (!is.null(input$lmer_concentrations) && length(input$lmer_concentrations)) {
+      df <- df %>% dplyr::filter(as.character(fiber_concentration) %in% as.character(input$lmer_concentrations))
+    }
+    
+    # 4. Final Cleanup
+    if (!"tank" %in% names(df) || all(is.na(df$tank))) {
+      df$tank <- as.character(seq_len(nrow(df)))
+    } else {
+      df$tank <- as.character(df$tank)
+    }
+    
+    # Time centering (Vectorized for safety)
+    df <- df %>%
+      dplyr::mutate(time_wk = suppressWarnings(as.numeric(as.character(week)))) %>%
+      dplyr::group_by(tank) %>%
+      dplyr::mutate(
+        time_wk_z = time_wk - mean(time_wk, na.rm = TRUE)
       ) %>%
+      dplyr::ungroup() %>%
       dplyr::filter(is.finite(outcome)) %>%
       droplevels()
     
-    validate(need(nrow(df) > 0, "No rows remain after Mixed Effects filters."))
+    n_tank <- dplyr::n_distinct(stats::na.omit(df$tank))
+    message(sprintf("[lmer-data] Final rows: %d | Groups: tank=%d", nrow(df), n_tank))
+    
+    validate(need(nrow(df) > 0, "No rows remain after filters."))
     df
   }) %>% bindCache(
     input$lmer_dataset, input$lmer_endpoint, input$lmer_fiber_types,
