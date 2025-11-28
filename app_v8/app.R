@@ -1117,27 +1117,19 @@ ui <- fluidPage(
               h5("Mixed Model Summary"), verbatimTextOutput("lmer_model_summary"),
               h5("ANOVA Table"),
               gt::gt_output("lmer_anova"),
-              downloadButton(
-                "download_lmer_anova",
-                "Download ANOVA PNG",
-                class = "btn-sm btn-warning",
-                icon = icon("image")
+              # Standard ANOVA Download
+              div(style = "margin-top: 5px;",
+                  downloadButton("download_lmer_anova", "Download Standard ANOVA PNG", class = "btn-sm btn-warning", icon = icon("image"))
               ),
               
               br(), hr(),
               
-              # --- NEW SECTION: Granular ANOVA ---
               h4("Stratified Interaction Analysis (Granular ANOVA)"),
               helpText("This table breaks down significance by Week. Values are P-values (Green = Significant)."),
               DT::dataTableOutput("lmer_granular_summary"),
-              # NEW: Download button for Granular ANOVA
+              # Granular ANOVA Download
               div(style = "margin-top: 5px;",
-                  downloadButton(
-                    "download_lmer_granular_png", 
-                    "Download Granular PNG", 
-                    class = "btn-sm btn-warning", 
-                    icon = icon("image")
-                  )
+                  downloadButton("download_lmer_granular_png", "Download Granular PNG", class = "btn-sm btn-warning", icon = icon("image"))
               ),
               
               br(), hr(),
@@ -1468,7 +1460,12 @@ ui <- fluidPage(
                   h4("Pairwise Comparisons"),
                   DT::dataTableOutput("recovery_comparisons")
                 ),
-                tabPanel("Recovery Plot", plotOutput("recovery_plot", height = "500px")),
+                tabPanel("Recovery Plot", 
+                         plotOutput("recovery_plot", height = "500px"),
+                         div(style = "margin-top: 10px;",
+                             downloadButton("download_recovery_png", "Download Plot (PNG)", class = "btn-sm btn-primary", icon = icon("download"))
+                         )
+                ),
                 tabPanel(
                   "Recovery EM Means",
                   conditionalPanel(
@@ -3331,16 +3328,21 @@ server <- function(input, output, session) {
     )
     df$experiment_batch <- dplyr::coalesce(!!!cand_batch)
     df$experiment_batch <- ifelse(is.na(df$experiment_batch), NA_character_, trimws(tolower(df$experiment_batch)))
-    # Derive experiment_batch from fiber_type when missing; two historical experiments
-    # correspond to cotton and PET respectively.
+    
+    # Derive experiment_batch from fiber_type when missing
     batch_raw <- df$experiment_batch
     missing_batch <- is.na(batch_raw) | (!is.na(batch_raw) & !nzchar(batch_raw))
+    
+    # FIX: Ensure batch_raw is treated as character to avoid "logical vs character" error in case_when
+    batch_raw <- as.character(batch_raw)
+    
     df$experiment_batch <- dplyr::case_when(
       !missing_batch ~ batch_raw,
       !is.na(df$fiber_type) & df$fiber_type == "cotton" ~ "experiment_cotton",
       !is.na(df$fiber_type) & df$fiber_type == "pet" ~ "experiment_pet",
       TRUE ~ NA_character_
     )
+    
     derived_batches <- sum(missing_batch & !is.na(df$experiment_batch))
     if (derived_batches > 0) {
       message(sprintf("[lmer-data] filled %d experiment_batch values based on fiber_type.", derived_batches))
@@ -4492,7 +4494,7 @@ server <- function(input, output, session) {
       )
   })
   
-  # 3. NEW: Download Handler for Granular ANOVA PNG
+  # --- 2. Granular ANOVA (PNG) ---
   output$download_lmer_granular_png <- downloadHandler(
     filename = function() {
       paste0(lmer_download_prefix(), "_granular_anova.png")
@@ -4518,25 +4520,21 @@ server <- function(input, output, session) {
           subtitle = "Significance (P-value) by Timepoint"
         )
       
-      # Apply 3-tier color scaling (mimicking the DT table)
-      # < 0.001
+      # Apply color scaling (Green for significant)
       for(col in week_cols) {
         gt_tbl <- gt_tbl %>%
           gt::tab_style(
             style = list(gt::cell_fill(color = "#a5d6a7"), gt::cell_text(weight = "bold")),
             locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] < 0.001)
           ) %>%
-          # < 0.01
           gt::tab_style(
             style = list(gt::cell_fill(color = "#c8e6c9"), gt::cell_text(weight = "bold")),
             locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] >= 0.001 & .data[[col]] < 0.01)
           ) %>%
-          # < 0.05
           gt::tab_style(
             style = list(gt::cell_fill(color = "#e8f5e9")),
             locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] >= 0.01 & .data[[col]] < 0.05)
           ) %>%
-          # Non-significant (dimmed)
           gt::tab_style(
             style = gt::cell_text(color = "#aaaaaa"),
             locations = gt::cells_body(columns = dplyr::all_of(col), rows = .data[[col]] >= 0.05)
@@ -6589,24 +6587,45 @@ server <- function(input, output, session) {
     cat("\nRandom-effects singular? ", lme4::isSingular(fit, tol = 1e-4), "\n")
   })
   
+  # ============================================================================
+  # CENTRALIZED FILENAME GENERATOR
+  # Format: endpoint_fiber_sample
+  # ============================================================================
+  
   lmer_download_prefix <- reactive({
-    fiber_sel <- tolower(input$lmer_fiber_types %||% character(0))
-    sample_sel <- if (identical(input$lmer_dataset, "assay")) {
-      tolower(input$lmer_sample_types %||% character(0))
-    } else if (identical(input$lmer_dataset, "physical") && identical(input$lmer_endpoint, "mf_counts")) {
-      tolower(input$lmer_tissue_types %||% character(0))
+    # 1. Get Endpoint
+    endpoint <- input$lmer_endpoint %||% "UnknownEndpoint"
+    
+    # 2. Get Fibers
+    # Collapse multiple selections with hyphen (e.g. "cotton-pet")
+    fiber_sel <- input$lmer_fiber_types %||% character(0)
+    fiber_str <- if (length(fiber_sel) > 0) paste(fiber_sel, collapse = "-") else "all"
+    
+    # 3. Get Sample/Tissue
+    if (identical(input$lmer_dataset, "assay")) {
+      sample_sel <- input$lmer_sample_types %||% character(0)
+    } else if (identical(input$lmer_dataset, "physical") && identical(endpoint, "mf_counts")) {
+      sample_sel <- input$lmer_tissue_types %||% character(0)
     } else {
-      tolower(input$lmer_endpoint %||% character(0))
+      sample_sel <- "all" # Physical endpoints usually don't have tissue labels
+    }
+    sample_str <- if (length(sample_sel) > 0) paste(sample_sel, collapse = "-") else "all"
+    
+    # 4. Clean Strings (lowercase, underscores)
+    clean_str <- function(x) {
+      x <- tolower(x)
+      x <- gsub("[^a-z0-9]+", "_", x) # Replace symbols with _
+      x <- gsub("^_+|_+$", "", x)     # Trim edges
+      return(x)
     }
     
-    pick_tag <- function(vals, fallback = "mixed") {
-      vals <- vals[nzchar(vals)]
-      if (length(vals) == 1L) vals else if (length(vals) == 0L) fallback else "mixed"
-    }
-    
-    fiber_tag <- pick_tag(fiber_sel)
-    sample_tag <- pick_tag(sample_sel, fallback = "all")
-    gsub("_+", "_", paste(fiber_tag, sample_tag, sep = "_"))
+    # 5. Combine
+    paste(
+      clean_str(endpoint),
+      clean_str(fiber_str),
+      clean_str(sample_str),
+      sep = "_"
+    )
   })
   
   # ---- Mixed effects ANOVA (robust DT) ----
@@ -6713,16 +6732,20 @@ server <- function(input, output, session) {
     tbl
   })
   
-  # --- Download Handler for Mixed Effects ANOVA (PNG) ---
+  # ============================================================================
+  # ANOVA DOWNLOAD HANDLERS
+  # ============================================================================
+  
+  # --- 1. Standard ANOVA (PNG) ---
   output$download_lmer_anova <- downloadHandler(
     filename = function() {
-      paste0(lmer_download_prefix(), "_anova.png")
+      paste0(lmer_download_prefix(), "_standard_anova.png")
     },
     content = function(file) {
       fit_list <- active_lmer_model()
       req(fit_list$model)
       
-      # 1. Calculate ANOVA (Type III Wald)
+      # Calculate ANOVA
       anova_res <- tryCatch(
         car::Anova(fit_list$model, type = 3), 
         error = function(e) anova(fit_list$model)
@@ -6730,54 +6753,49 @@ server <- function(input, output, session) {
       df <- as.data.frame(anova_res)
       df$Term <- rownames(df)
       
-      # Preserve all fixed-effect terms from the fitted model (even if dropped in ANOVA)
+      # Preserve fixed terms from model formula (in case dropped)
       fixed_terms <- attr(stats::terms(lme4::nobars(stats::formula(fit_list$model))), "term.labels")
       if (!is.null(fixed_terms) && length(fixed_terms) > 0) {
         df <- merge(
           data.frame(Term = fixed_terms, stringsAsFactors = FALSE),
-          df,
-          by = "Term",
-          all.x = TRUE,
-          sort = FALSE
+          df, by = "Term", all.x = TRUE, sort = FALSE
         )
       }
       
-      # 2. Format Terms (Interaction x, Title Case)
-      #    Replace ':' with ' x '
+      # Clean Term Names
       df$Term <- gsub(":", " x ", df$Term)
-      #    Remove underscores and Capitalize
       df$Term <- tools::toTitleCase(gsub("_", " ", df$Term))
-      #    Clean up intercept
       df$Term <- gsub("\\(Intercept\\)", "Intercept", df$Term)
       
-      #    Reorder columns: Term first
-      if ("Term" %in% names(df)) {
-        df <- df[, c("Term", setdiff(names(df), "Term"))]
-      }
+      # Organize Columns
+      names(df) <- gsub("Pr\\(>Chisq\\)|Pr\\(>F\\)", "P_Value", names(df))
+      names(df) <- gsub("Chisq", "Chi_Square", names(df))
       
-      # 3. Create formatted GT table
+      if ("Term" %in% names(df)) df <- df[, c("Term", setdiff(names(df), "Term"))]
+      
+      # Build GT Table for image export
       gt_tbl <- gt::gt(df) %>%
         gt::fmt_number(columns = where(is.numeric), decimals = 3) %>%
-        gt::fmt_number(columns = matches("P|Pr"), decimals = 4) %>%
+        gt::fmt_number(columns = matches("P_Value"), decimals = 4) %>%
         gt::cols_label(
           Term = "Fixed Effect",
-          `Pr(>Chisq)` = "P-Value",
-          Chisq = "Chi-Square",
-          `Df` = "DF"
+          P_Value = "P-Value",
+          Chi_Square = "Chi-Square",
+          Df = "DF"
         ) %>%
         gt::tab_header(
           title = "Analysis of Variance",
-          subtitle = "Type III Wald F tests with Kenward-Roger df"
+          subtitle = "Type III Wald Tests"
         ) %>%
         gt::tab_style(
           style = gt::cell_text(weight = "bold"),
           locations = gt::cells_body(
-            columns = matches("P|Pr"), 
-            rows = if("Pr(>Chisq)" %in% names(df)) df[["Pr(>Chisq)"]] < 0.05 else FALSE
+            columns = matches("P_Value"), 
+            rows = if("P_Value" %in% names(df)) df[["P_Value"]] < 0.05 else FALSE
           )
         )
       
-      # 4. Save as PNG using webshot2 via gt
+      # Save
       gt::gtsave(gt_tbl, filename = file)
     },
     contentType = "image/png"
@@ -7187,11 +7205,15 @@ server <- function(input, output, session) {
     DT::datatable(as.data.frame(res$emmeans$delta), options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
   })
   
-  output$recovery_plot <- renderPlot({
+  # --- Recovery Plot Reactive (for display and download) ---
+  recovery_plot_obj <- reactive({
     res <- recovery_state()
-    validate(need(!is.null(res), ""))
+    validate(need(!is.null(res), "Run Recovery Analysis first."))
     validate(need(is.null(res$error), res$error))
+    
     df <- res$data
+    validate(need(nrow(df) > 0, "No data to plot."))
+    
     ggplot2::ggplot(df, ggplot2::aes(x = is_recovery, y = outcome, color = fiber_type, linetype = chem_treatment)) +
       ggplot2::stat_summary(fun = mean, geom = "point", size = 3) +
       ggplot2::stat_summary(fun.data = ~ c(
@@ -7199,8 +7221,69 @@ server <- function(input, output, session) {
         ymax = mean(.) + sd(.) / sqrt(length(.))
       ), geom = "errorbar", width = 0.2) +
       ggplot2::theme_minimal() +
-      ggplot2::labs(title = "Recovery (Week6 vs Week5)", x = "Time point", y = "Outcome")
+      ggplot2::labs(
+        title = paste0("Recovery Analysis: ", input$recovery_endpoint),
+        subtitle = paste(input$recovery_baseline_week, "vs", input$recovery_recovery_week),
+        x = "Time Point", 
+        y = input$recovery_endpoint
+      )
   })
+  
+  # Display Plot
+  output$recovery_plot <- renderPlot({
+    recovery_plot_obj()
+  })
+  
+  # Download Handler
+  output$download_recovery_png <- downloadHandler(
+    filename = function() {
+      # 1. Gather name components
+      endpoint <- input$recovery_endpoint %||% "UnknownEndpoint"
+      fibers   <- paste(input$recovery_fiber_types %||% "all", collapse = "-")
+      
+      # Sample type depends on dataset
+      if (identical(input$recovery_dataset, "assay")) {
+        samples <- paste(input$recovery_samples %||% "all", collapse = "-")
+      } else {
+        # For physical, usually 'all' unless it's mf_counts with tissues
+        if (identical(endpoint, "mf_counts")) {
+          samples <- paste(input$recovery_tissues %||% "all", collapse = "-")
+        } else {
+          samples <- "all"
+        }
+      }
+      
+      # 2. Clean strings (lowercase, underscores)
+      clean_str <- function(x) {
+        x <- tolower(x)
+        x <- gsub("[^a-z0-9]+", "_", x) # Replace symbols with _
+        x <- gsub("^_+|_+$", "", x)     # Trim edges
+        return(x)
+      }
+      
+      # 3. Build filename
+      paste(
+        clean_str(endpoint),
+        clean_str(fibers),
+        clean_str(samples),
+        "recovery_plot.png",
+        sep = "_"
+      )
+    },
+    content = function(file) {
+      # Save using ggsave
+      ggplot2::ggsave(
+        filename = file,
+        plot = recovery_plot_obj(),
+        device = "png",
+        width = 8,
+        height = 6,
+        units = "in",
+        dpi = 300,
+        bg = "white"
+      )
+    }
+  )
   
   output$recovery_emmeans_table <- DT::renderDataTable({
     res <- recovery_state()
