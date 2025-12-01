@@ -4586,9 +4586,16 @@ server <- function(input, output, session) {
     validate(need(!is.null(df_plot), "Could not generate dose-response data."))
     validate(need("dose_disp" %in% names(df_plot), "Data missing 'dose_disp' column."))
     
-    # Dynamic Faceting
+    # --- VISUAL FIX: Hide the "Treated" dot at Dose 0 ---
+    # We keep the Red line connecting to 0 (in df_plot),
+    # but we remove the Red dot/errorbar at 0 (in df_points) so only the Blue control shows.
+    is_shadow <- df_plot$dose_disp == 0 & 
+      !grepl("untreated", df_plot$chem_treatment, ignore.case = TRUE)
+    df_points <- df_plot[!is_shadow, ]
+    # ----------------------------------------------------
+    
+    # Facet logic
     facet_cols <- c()
-    # Check for 'week' (which our helper now ensures exists even for spline refits)
     if ("week" %in% names(df_plot)) facet_cols <- c(facet_cols, "week")
     if ("fiber_type" %in% names(df_plot)) facet_cols <- c(facet_cols, "fiber_type")
     
@@ -4598,15 +4605,23 @@ server <- function(input, output, session) {
       NULL
     }
     
-    p <- ggplot(df_plot, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment, group = chem_treatment)) +
-      geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2, alpha = 0.5) +
-      geom_line(linewidth = 1) +
-      geom_point(size = 3) +
+    # Plot construction
+    # Note: We use df_plot for LINE (to connect to 0) but df_points for POINTS (to hide red dot at 0)
+    p <- ggplot() +
+      # 1. Lines (Use full data so Red line connects to the start)
+      geom_line(data = df_plot, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment, group = chem_treatment), linewidth = 1) +
+      
+      # 2. Error Bars (Use filtered data - no red error bar at 0)
+      geom_errorbar(data = df_points, aes(x = as.factor(dose_disp), ymin = lower.CL, ymax = upper.CL, color = chem_treatment), width = 0.2, alpha = 0.5) +
+      
+      # 3. Points (Use filtered data - no red dot at 0)
+      geom_point(data = df_points, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment), size = 3) +
+      
       scale_color_manual(values = get_treatment_palette()) +
       theme_publication() +
       labs(
         title = "Dose-Response Analysis",
-        subtitle = "Estimated means across concentrations.",
+        subtitle = "Estimated means across concentrations (Shared Baseline).",
         x = "Fiber Concentration (mf/L)",
         y = "Model Estimated Outcome",
         color = "Treatment"
@@ -4653,13 +4668,10 @@ server <- function(input, output, session) {
   # 3. Download Handler for Dose-Response Plot (Updated Naming)
   output$download_lmer_dose_plot <- downloadHandler(
     filename = function() {
-      # 1. Get selections from input (safe fallback to "Unknown")
+      # 1. Get selections
       endpoint <- input$lmer_endpoint %||% "UnknownEndpoint"
-      
-      # Fiber: Get selected, collapse multiple if needed
       fibers <- paste(input$lmer_fiber_types %||% "UnknownFiber", collapse = "-")
       
-      # Sample Type: Logic depends on dataset type
       if (input$lmer_dataset == "assay") {
         samples <- paste(input$lmer_sample_types %||% "UnknownSample", collapse = "-")
       } else if (input$lmer_dataset == "physical" && endpoint == "mf_counts") {
@@ -4668,26 +4680,23 @@ server <- function(input, output, session) {
         samples <- "AllSamples"
       }
       
-      # 2. Clean strings (remove spaces, make safe for filename)
+      # 2. Clean strings
       clean_str <- function(x) {
         x <- tolower(x)
-        x <- gsub("[^a-z0-9]+", "_", x) # Replace non-alphanumeric with underscore
-        x <- gsub("^_+|_+$", "", x)     # Trim leading/trailing underscores
+        x <- gsub("[^a-z0-9]+", "_", x) 
+        x <- gsub("^_+|_+$", "", x)    
         return(x)
       }
       
-      fname <- paste(
+      paste(
         clean_str(endpoint),
         clean_str(fibers),
         clean_str(samples),
         "doseplot.png",
         sep = "_"
       )
-      
-      return(fname)
     },
     content = function(file) {
-      # Re-create plot logic for download (must be identical to renderPlot above)
       fit_list <- active_lmer_model()
       req(fit_list$model)
       
@@ -4697,7 +4706,12 @@ server <- function(input, output, session) {
       )
       validate(need(!is.null(df_plot), "No plot data"))
       
-      # Facet logic
+      # --- VISUAL FIX FOR DOWNLOAD ---
+      is_shadow <- df_plot$dose_disp == 0 & 
+        !grepl("untreated", df_plot$chem_treatment, ignore.case = TRUE)
+      df_points <- df_plot[!is_shadow, ]
+      # -------------------------------
+      
       facet_cols <- c()
       if ("week" %in% names(df_plot)) facet_cols <- c(facet_cols, "week")
       if ("fiber_type" %in% names(df_plot)) facet_cols <- c(facet_cols, "fiber_type")
@@ -4708,10 +4722,11 @@ server <- function(input, output, session) {
         NULL
       }
       
-      p <- ggplot(df_plot, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment, group = chem_treatment)) +
-        geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2, alpha = 0.5) +
-        geom_line(linewidth = 1) +
-        geom_point(size = 3) +
+      # Reconstruct plot with filtered points
+      p <- ggplot() +
+        geom_line(data = df_plot, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment, group = chem_treatment), linewidth = 1) +
+        geom_errorbar(data = df_points, aes(x = as.factor(dose_disp), ymin = lower.CL, ymax = upper.CL, color = chem_treatment), width = 0.2, alpha = 0.5) +
+        geom_point(data = df_points, aes(x = as.factor(dose_disp), y = emmean, color = chem_treatment), size = 3) +
         scale_color_manual(values = get_treatment_palette()) +
         theme_publication() +
         labs(
@@ -4726,7 +4741,6 @@ server <- function(input, output, session) {
         p <- p + facet_grid(facet_formula, labeller = label_both)
       }
       
-      # Save using ggsave (Standard settings)
       ggplot2::ggsave(
         filename = file,
         plot = p,

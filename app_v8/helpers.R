@@ -659,8 +659,9 @@ generate_granular_anova <- function(model, data, return_format = "numeric") {
 }
 
 # ==============================================================================
-# DOSE-RESPONSE VISUALIZATION (Refit-Aware)
+# DOSE-RESPONSE VISUALIZATION (Refit-Aware + Shared Control Point)
 # ==============================================================================
+
 generate_dose_response_data <- function(model, data) {
   require(emmeans)
   require(dplyr)
@@ -691,7 +692,6 @@ generate_dose_response_data <- function(model, data) {
     df <- as.data.frame(summary(emm))
     df <- fix_ci_names(df)
     
-    # Rename week_numeric to week for plotting consistency
     if (time_var == "week_numeric" && "week_numeric" %in% names(df)) {
       df$week <- as.factor(df$week_numeric)
     }
@@ -702,7 +702,7 @@ generate_dose_response_data <- function(model, data) {
     return(df)
   }
   
-  # --- SCENARIO B: Numeric Log Dose ---
+  # --- SCENARIO B: Numeric Log Dose (Continuous) ---
   
   # 1. Define Formulas
   f_base <- paste("~", paste(group_terms, collapse = "+"))
@@ -720,6 +720,35 @@ generate_dose_response_data <- function(model, data) {
   df_ctrl  <- as.data.frame(summary(emm_ctrl))
   df_ctrl  <- fix_ci_names(df_ctrl)
   df_ctrl$dose_disp <- 0 
+  
+  # --- VISUAL IMPROVEMENT: Force Shared Baseline at 0 ---
+  # Overwrite the hypothetical "Treated @ 0" estimate with the "Untreated @ 0" estimate
+  # so both lines visually originate from the Real Control data.
+  if ("chem_treatment" %in% names(df_ctrl)) {
+    # Identify Real Control rows (Untreated)
+    is_untreated <- grepl("untreated", df_ctrl$chem_treatment, ignore.case = TRUE)
+    
+    if (any(is_untreated)) {
+      real_controls <- df_ctrl[is_untreated, ]
+      
+      # Create a "Shadow" of these controls for the Treated group
+      shadow_controls <- real_controls
+      
+      # Find the label for the Treated group (e.g. "Treated" or "treated")
+      all_levels <- levels(df_ctrl$chem_treatment)
+      if (is.null(all_levels)) all_levels <- unique(df_ctrl$chem_treatment)
+      
+      # Pick the level that is NOT untreated
+      treated_lab <- all_levels[!grepl("untreated", all_levels, ignore.case = TRUE)][1]
+      
+      if (!is.na(treated_lab)) {
+        shadow_controls$chem_treatment <- treated_lab
+        # Replace original df_ctrl with the Shared Baseline version
+        df_ctrl <- rbind(real_controls, shadow_controls)
+      }
+    }
+  }
+  # -----------------------------------------------------
   
   # 3. Treated Points
   at_dose <- list(dose_log10 = c(2, 3, 4), is_control = 0)
