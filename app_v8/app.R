@@ -1498,6 +1498,12 @@ ui <- fluidPage(
                   conditionalPanel(
                     condition = "!input.recovery_include_emmeans",
                     div(class = "alert alert-info", "Enable 'Include EM Means Analysis' to view emmeans results.")
+                  ),
+                  downloadButton(
+                    "download_recovery_emmeans_png", 
+                    "Download Table (PNG)", 
+                    class = "btn-sm btn-warning", 
+                    icon = icon("image")
                   )
                 ),
                 tabPanel("Translocation Summary", DT::dataTableOutput("transloc_summary_table")),
@@ -7377,6 +7383,73 @@ server <- function(input, output, session) {
     }
     validate(need(FALSE, "No emmeans object to plot"))
   })
+  
+  # --- Download Handler for Recovery EMMeans Table (Robust Fix) ---
+  output$download_recovery_emmeans_png <- downloadHandler(
+    filename = function() {
+      # 1. Capture current input values
+      # Use safe fallbacks (%||%) in case inputs are initializing
+      ep <- input$recovery_endpoint %||% "recovery"
+      ds <- input$recovery_dataset %||% "assay"
+      
+      # 2. Get Fiber selection
+      fibers <- paste(input$recovery_fiber_types %||% "all", collapse = "-")
+      
+      # 3. Get Sample selection based on dataset type
+      if (identical(ds, "assay")) {
+        samples <- paste(input$recovery_samples %||% "all", collapse = "-")
+      } else {
+        # Physical data logic
+        if (identical(ep, "mf_counts")) {
+          samples <- paste(input$recovery_tissues %||% "all", collapse = "-")
+        } else {
+          samples <- "all"
+        }
+      }
+      
+      # 4. Clean strings (remove spaces/symbols for safe filenames)
+      clean_str <- function(x) {
+        x <- tolower(x)
+        x <- gsub("[^a-z0-9]+", "_", x) # Replace symbols with underscore
+        x <- gsub("^_+|_+$", "", x)     # Trim underscores
+        return(x)
+      }
+      
+      # 5. Build Final Filename
+      paste(
+        clean_str(ep),
+        clean_str(fibers),
+        clean_str(samples),
+        "recovery_emmeans.png",
+        sep = "_"
+      )
+    },
+    content = function(file) {
+      # 1. Get Data
+      res <- recovery_state()
+      validate(need(!is.null(res), "Run Recovery Analysis first."))
+      req(res$emmeans_tbl)
+      
+      # 2. Build GT Table
+      gt_tbl <- gt::gt(res$emmeans_tbl) %>%
+        gt::fmt_number(columns = where(is.numeric), decimals = 4) %>%
+        gt::tab_header(
+          title = "Recovery Analysis: EM Means",
+          subtitle = paste("Endpoint:", input$recovery_endpoint)
+        )
+      
+      # 3. ROBUST SAVE (Fixes HTML issue)
+      # Create a specific temp file with .png extension so gt knows what to do
+      temp_png <- tempfile(fileext = ".png")
+      
+      # Save to that known .png path
+      gt::gtsave(gt_tbl, filename = temp_png)
+      
+      # Copy the correctly generated PNG to the Shiny download location
+      file.copy(temp_png, file)
+    }
+  )
+  
   
   # ----------------- Translocation: data filter & summary (mf_counts only) -----------------
   
