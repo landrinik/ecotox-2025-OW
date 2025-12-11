@@ -1472,6 +1472,15 @@ ui <- fluidPage(
                     condition = "input.recovery_include_emmeans",
                     h4("Estimated Marginal Means"),
                     DT::dataTableOutput("recovery_emmeans_table"),
+                    div(
+                      style = "margin: 6px 0;",
+                      downloadButton(
+                        "download_recovery_emmeans_table_png",
+                        "Download EMMeans Table (PNG)",
+                        class = "btn-sm btn-warning",
+                        icon = icon("image")
+                      )
+                    ),
                     br(),
                     fluidRow(
                       column(
@@ -1500,8 +1509,8 @@ ui <- fluidPage(
                     div(class = "alert alert-info", "Enable 'Include EM Means Analysis' to view emmeans results.")
                   ),
                   downloadButton(
-                    "download_recovery_emmeans_png", 
-                    "Download Table (PNG)", 
+                    "download_recovery_emmeans_png",
+                    "Download Table (PNG)",
                     class = "btn-sm btn-warning", 
                     icon = icon("image")
                   )
@@ -1529,172 +1538,100 @@ ui <- fluidPage(
               wellPanel(
                 h4("DiD Setup"),
                 
-                # Dataset + endpoint (unchanged)
+                # Row 1: Dataset & Endpoint
                 fluidRow(
-                  column(
-                    6,
-                    selectInput(
-                      "did_dataset", "Dataset:",
-                      choices = c("Assay Data" = "assay", "Physical Data" = "physical"),
-                      selected = "assay"
-                    )
-                  ),
-                  column(
-                    6,
-                    selectInput("did_endpoint", "Endpoint:", choices = NULL)
-                  )
+                  column(6, selectInput("did_dataset", "Dataset", choices = c("Assay Data" = "assay", "Physical Data" = "physical"), selected = "assay")),
+                  column(6, selectInput("did_endpoint", "Endpoint", choices = NULL))
                 ),
                 
-                # DiD mode selection (unchanged semantics, label text harmonized)
-                radioButtons(
-                  "did_mode", "DiD Mode:",
-                  choices = c(
-                    "Across Fiber (at week)" = "across_fiber",
-                    "Across Week (within fiber)" = "across_week",
-                    "Across Treatment (within week)" = "across_treatment"
-                  ),
-                  selected = "across_fiber"
+                # Row 2: Mode
+                radioButtons("did_mode", "DiD Mode",
+                             choices = c(
+                               "Across Fiber (at week)" = "across_fiber",
+                               "Across Week (within fiber)" = "across_week",
+                               "Across Treatment (within week)" = "across_treatment"
+                             ),
+                             selected = "across_fiber"
                 ),
                 
-                # Sample/Tissue selection - only for across_fiber and across_week
+                # Row 3: Sample / Tissue Filters
                 conditionalPanel(
                   condition = "input.did_mode == 'across_fiber' || input.did_mode == 'across_week'",
                   conditionalPanel(
                     condition = "input.did_dataset == 'assay'",
-                    div(
-                      id = "did_samples_box",
-                      checkboxGroupInput(
-                        inputId = "did_samples",
-                        label = "Sample types:",
-                        choices = character(0), # filled by server
-                        selected = NULL,
-                        inline = TRUE
-                      ),
-                      uiOutput("did_samples_hint") # hint text managed by server
+                    div(id = "did_samples_box",
+                        checkboxGroupInput("did_samples", "Sample types", choices = character(0), inline = TRUE),
+                        uiOutput("did_samples_hint")
                     )
                   ),
-                  
-                  # Physical selectors
                   conditionalPanel(
                     condition = "input.did_dataset == 'physical'",
-                    div(
-                      id = "did_tissues_box",
-                      checkboxGroupInput(
-                        inputId = "did_tissues",
-                        label = "Tissues:",
-                        choices = character(0), # filled by server
-                        selected = NULL,
-                        inline = TRUE
-                      ),
-                      uiOutput("did_tissues_hint") # hint text managed by server
+                    div(id = "did_tissues_box",
+                        checkboxGroupInput("did_tissues", "Tissues", choices = character(0), inline = TRUE),
+                        uiOutput("did_tissues_hint")
                     )
                   )
                 ),
                 
-                # Week selection - for across_fiber and across_treatment
+                # Row 4: Week/Fiber Selectors (Mode Dependent)
                 conditionalPanel(
                   condition = "input.did_mode == 'across_fiber' || input.did_mode == 'across_treatment'",
-                  selectInput("did_week_select", "Select Week:",
-                              choices = c("1", "3", "5"), selected = "5"
-                  )
+                  selectInput("did_week_select", "Select Week", choices = c("1", "3", "5"), selected = "5")
                 ),
-                
-                # Fiber selection - for across_week and across_treatment
                 conditionalPanel(
                   condition = "input.did_mode == 'across_week' || input.did_mode == 'across_treatment'",
-                  selectInput("did_fiber_select", "Select Fiber:",
-                              choices = c("Cotton" = "cotton", "PET" = "pet"),
-                              selected = "cotton"
-                  )
+                  selectInput("did_fiber_select", "Select Fiber", choices = c("Cotton" = "cotton", "PET" = "pet"), selected = "cotton")
                 ),
                 
-                # Contrast type - only for across_fiber
+                # Row 5: Across-Fiber Specifics
                 conditionalPanel(
                   condition = "input.did_mode == 'across_fiber'",
-                  radioButtons(
-                    "did_across_fiber_contrast", "Contrast Type:",
-                    choices = c(
-                      "DiD (fiber effect on treatment)" = "did",
-                      "Single-treatment fiber contrast" = "single_trt"
-                    ),
-                    selected = "did"
-                  )
-                ),
-                
-                # Single treatment selector - only when single_trt is selected
-                conditionalPanel(
-                  condition = "input.did_mode == 'across_fiber' && input.did_across_fiber_contrast == 'single_trt'",
-                  selectInput(
-                    "did_single_treatment", "Select Treatment:",
-                    choices = c("Treated" = "treated", "Untreated" = "untreated"),
-                    selected = "treated"
-                  )
-                ),
-                
-                # Fiber A and B - only for across_fiber DiD mode
-                conditionalPanel(
-                  condition = "input.did_mode == 'across_fiber' && input.did_across_fiber_contrast == 'did'",
-                  selectInput("did_fiber_a", "Fiber A:",
-                              choices = c("Cotton" = "cotton", "PET" = "pet"),
-                              selected = "pet"
+                  radioButtons("did_across_fiber_contrast", "Contrast Type",
+                               choices = c("DiD (fiber effect on treatment)" = "did", "Single-treatment fiber contrast" = "single_trt"),
+                               selected = "did"
                   ),
-                  selectInput("did_fiber_b", "Fiber B:",
-                              choices = c("Cotton" = "cotton", "PET" = "pet"),
-                              selected = "cotton"
+                  conditionalPanel(
+                    condition = "input.did_across_fiber_contrast == 'single_trt'",
+                    selectInput("did_single_treatment", "Select Treatment", choices = c("Treated" = "treated", "Untreated" = "untreated"), selected = "treated")
+                  ),
+                  conditionalPanel(
+                    condition = "input.did_across_fiber_contrast == 'did'",
+                    selectInput("did_fiber_a", "Fiber A", choices = c("Cotton" = "cotton", "PET" = "pet"), selected = "pet"),
+                    selectInput("did_fiber_b", "Fiber B", choices = c("Cotton" = "cotton", "PET" = "pet"), selected = "cotton")
                   )
                 ),
                 
-                # Week A and B - only for across_week
+                # Row 6: Across-Week Specifics
                 conditionalPanel(
                   condition = "input.did_mode == 'across_week'",
-                  selectInput("did_week_a", "Week A:",
-                              choices = c("1", "3", "5"), selected = "3"
-                  ),
-                  selectInput("did_week_b", "Week B:",
-                              choices = c("1", "3", "5"), selected = "5"
-                  )
+                  selectInput("did_week_a", "Week A", choices = c("1", "3", "5"), selected = "3"),
+                  selectInput("did_week_b", "Week B", choices = c("1", "3", "5"), selected = "5")
                 ),
                 
-                # Baseline selector (now includes untreated_ctrl)
+                # Row 7: Baseline & Dose (Updated for across_week)
                 conditionalPanel(
-                  condition = "input.did_mode == 'across_fiber'",
-                  radioButtons(
-                    inputId = "did_baseline_type",
-                    label = "Baseline for DiD:",
-                    choices = c(
-                      "Untreated vs Treated (current)"        = "treatment",
-                      "Dose vs 0 control (new)"               = "dose",
-                      "Untreated dose vs 0 (control-offset)"  = "untreated_ctrl" # NEW
-                    ),
-                    selected = "treatment",
-                    inline = FALSE
+                  condition = "input.did_mode == 'across_fiber' || input.did_mode == 'across_week'",
+                  radioButtons("did_baseline_type", "Baseline for DiD",
+                               choices = c(
+                                 "Untreated vs Treated (current treatment)" = "treatment",
+                                 "Dose vs 0 control (new)" = "dose",
+                                 "Untreated dose vs 0 (control-offset)" = "untreated_ctrl"
+                               ),
+                               selected = "treatment"
                   ),
-                  # Dose picker shown for both 'dose' and 'untreated_ctrl'
                   conditionalPanel(
                     condition = "input.did_baseline_type == 'dose' || input.did_baseline_type == 'untreated_ctrl'",
-                    selectInput(
-                      inputId = "did_treated_dose",
-                      label = "Dose for baseline (mf/L):",
-                      choices = c("100", "1000", "10000"),
-                      selected = "100"
-                    )
+                    selectInput("did_treated_dose", "Dose for baseline (mf/L)", choices = c("100", "1000", "10000"), selected = "100")
                   )
                 ),
                 
-                # Treatment A and B - only for across_treatment
+                # Row 8: Across-Treatment Specifics
                 conditionalPanel(
                   condition = "input.did_mode == 'across_treatment'",
-                  selectInput("did_trt_a", "Treatment A:",
-                              choices = c("Treated" = "treated", "Untreated" = "untreated"),
-                              selected = "treated"
-                  ),
-                  selectInput("did_trt_b", "Treatment B:",
-                              choices = c("Treated" = "treated", "Untreated" = "untreated"),
-                              selected = "untreated"
-                  )
+                  selectInput("did_trt_a", "Treatment A", choices = c("Treated" = "treated", "Untreated" = "untreated"), selected = "treated"),
+                  selectInput("did_trt_b", "Treatment B", choices = c("Treated" = "treated", "Untreated" = "untreated"), selected = "untreated")
                 ),
                 
-                # Run button
                 hr(),
                 actionButton("run_did", "Run DiD Analysis", class = "btn-primary")
               )
@@ -1707,15 +1644,36 @@ ui <- fluidPage(
                   h4("Custom DiD Contrast"),
                   verbatimTextOutput("did_summary"),
                   br(),
-                  DT::dataTableOutput("did_table")
+                  DT::dataTableOutput("did_table"),
+                  br(),
+                  # NEW: DiD result table PNG download
+                  downloadButton(
+                    outputId = "download_did_table_png",
+                    label    = "Download DiD table PNG",
+                    class    = "btn-sm btn-warning"
+                  )
                 ),
                 tabPanel(
                   "EMMeans Grid",
-                  DT::dataTableOutput("did_emm_table")
+                  DT::dataTableOutput("did_emm_table"),
+                  br(),
+                  # NEW: EMMeans grid table PNG download
+                  downloadButton(
+                    outputId = "download_did_emm_table_png",
+                    label    = "Download EMMeans table PNG",
+                    class    = "btn-sm btn-warning"
+                  )
                 ),
                 tabPanel(
                   "Visualization",
-                  plotOutput("did_plot", height = "480px")
+                  plotOutput("did_plot", height = "480px"),
+                  br(),
+                  # NEW: DiD visualization plot PNG download
+                  downloadButton(
+                    outputId = "download_did_plot_png",
+                    label    = "Download plot PNG",
+                    class    = "btn-sm btn-primary"
+                  )
                 )
               )
             )
@@ -7273,6 +7231,59 @@ server <- function(input, output, session) {
     }
   )
   
+  # Download handler for EMMeans table PNG
+  output$download_recovery_emmeans_table_png <- downloadHandler(
+    filename = function() {
+      endpoint <- input$recovery_endpoint %||% "recovery"
+      fibers   <- paste(input$recovery_fiber_types %||% "all", collapse = "-")
+      
+      samples <- if (identical(input$recovery_dataset, "assay")) {
+        paste(input$recovery_samples %||% "all", collapse = "-")
+      } else if (identical(input$recovery_endpoint, "mf_counts")) {
+        paste(input$recovery_tissues %||% "all", collapse = "-")
+      } else {
+        "all"
+      }
+      
+      clean_str <- function(x) {
+        x <- tolower(x)
+        x <- gsub("[^a-z0-9]+", "_", x)
+        gsub("^_+|_+$", "", x)
+      }
+      
+      paste(
+        clean_str(endpoint),
+        clean_str(fibers),
+        clean_str(samples),
+        "recovery_emmeans_table.png",
+        sep = "_"
+      )
+    },
+    content = function(file) {
+      res <- recovery_state()
+      validate(need(!is.null(res), "Run Recovery Analysis first."))
+      validate(need(is.null(res$error), res$error))
+      
+      tbl <- res$emmeans$emmeans_df
+      validate(need(!is.null(tbl) && nrow(tbl) > 0, "No EMMeans table to export."))
+      
+      gt_tbl <- gt::gt(tbl) %>%
+        gt::fmt_number(columns = where(is.numeric), decimals = 4) %>%
+        gt::tab_header(
+          title = "Recovery Analysis: EMMeans",
+          subtitle = paste(
+            "Endpoint:", input$recovery_endpoint,
+            "| Baseline Week:", input$recovery_baseline_week,
+            "| Recovery Week:", input$recovery_recovery_week
+          )
+        )
+      
+      temp_png <- tempfile(fileext = ".png")
+      gt::gtsave(gt_tbl, filename = temp_png)
+      file.copy(temp_png, file, overwrite = TRUE)
+    }
+  )
+  
   output$recovery_emmeans_table <- DT::renderDataTable({
     res <- recovery_state()
     validate(need(!is.null(res), ""))
@@ -7384,38 +7395,34 @@ server <- function(input, output, session) {
     validate(need(FALSE, "No emmeans object to plot"))
   })
   
-  # --- Download Handler for Recovery EMMeans Table (Robust Fix) ---
+  # --- Download Handler for Recovery EMMeans Table (Fixed) ---
   output$download_recovery_emmeans_png <- downloadHandler(
     filename = function() {
-      # 1. Capture current input values
-      # Use safe fallbacks (%||%) in case inputs are initializing
+      # 1. Capture Inputs
       ep <- input$recovery_endpoint %||% "recovery"
       ds <- input$recovery_dataset %||% "assay"
       
-      # 2. Get Fiber selection
+      # 2. Get Fibers
       fibers <- paste(input$recovery_fiber_types %||% "all", collapse = "-")
       
-      # 3. Get Sample selection based on dataset type
-      if (identical(ds, "assay")) {
-        samples <- paste(input$recovery_samples %||% "all", collapse = "-")
+      # 3. Get Samples/Tissues based on dataset
+      samples <- if (identical(ds, "assay")) {
+        paste(input$recovery_samples %||% "all", collapse = "-")
+      } else if (identical(ep, "mf_counts")) {
+        paste(input$recovery_tissues %||% "all", collapse = "-")
       } else {
-        # Physical data logic
-        if (identical(ep, "mf_counts")) {
-          samples <- paste(input$recovery_tissues %||% "all", collapse = "-")
-        } else {
-          samples <- "all"
-        }
+        "all"
       }
       
-      # 4. Clean strings (remove spaces/symbols for safe filenames)
+      # 4. Cleaning Helper
       clean_str <- function(x) {
         x <- tolower(x)
         x <- gsub("[^a-z0-9]+", "_", x) # Replace symbols with underscore
-        x <- gsub("^_+|_+$", "", x)     # Trim underscores
+        x <- gsub("^_+|_+$", "", x)     # Trim edges
         return(x)
       }
       
-      # 5. Build Final Filename
+      # 5. Construct Filename
       paste(
         clean_str(ep),
         clean_str(fibers),
@@ -7428,25 +7435,69 @@ server <- function(input, output, session) {
       # 1. Get Data
       res <- recovery_state()
       validate(need(!is.null(res), "Run Recovery Analysis first."))
-      req(res$emmeans_tbl)
+      validate(need(is.null(res$error), res$error))
+      validate(need(!is.null(res$emmeans$delta), "No Week6 vs Week5 contrasts available for export."))
       
-      # 2. Build GT Table
-      gt_tbl <- gt::gt(res$emmeans_tbl) %>%
-        gt::fmt_number(columns = where(is.numeric), decimals = 4) %>%
-        gt::tab_header(
-          title = "Recovery Analysis: EM Means",
-          subtitle = paste("Endpoint:", input$recovery_endpoint)
+      df <- as.data.frame(res$emmeans$delta)
+      
+      numeric_cols <- intersect(
+        c("estimate", "SE", "df", "t.ratio", "z.ratio", "p.value", "lower.CL", "upper.CL"),
+        names(df)
+      )
+      
+      adj_method <- if (!is.null(input$recovery_p_adjust)) input$recovery_p_adjust else "BH"
+      
+      df <- df %>%
+        dplyr::mutate(
+          dplyr::across(dplyr::all_of(numeric_cols), ~ suppressWarnings(signif(.x, 5))),
+          p_value_raw = p.value,
+          p_value_adj = suppressWarnings(p.adjust(p_value_raw, method = adj_method)),
+          stars = dplyr::case_when(
+            is.na(p_value_adj) ~ "",
+            p_value_adj < 0.001 ~ "***",
+            p_value_adj < 0.01 ~ "**",
+            p_value_adj < 0.05 ~ "*",
+            TRUE ~ ""
+          ),
+          Significant = dplyr::if_else(
+            !is.na(p_value_adj) & p_value_adj < 0.05,
+            paste0("Yes ", stars),
+            paste0("No ", stars)
+          )
         )
       
-      # 3. ROBUST SAVE (Fixes HTML issue)
-      # Create a specific temp file with .png extension so gt knows what to do
+      if ("contrast" %in% names(df)) {
+        df <- df %>% dplyr::rename(`Week6 vs Week5` = contrast)
+      }
+      
+      show_cols <- intersect(
+        c(
+          "Week6 vs Week5", "is_recovery", "chem_treatment", "fiber_type",
+          "estimate", "SE", "df", "t.ratio", "z.ratio",
+          "p_value_raw", "p_value_adj", "lower.CL", "upper.CL", "Significant"
+        ),
+        names(df)
+      )
+      
+      out <- df %>% dplyr::select(dplyr::all_of(show_cols))
+      
+      gt_tbl <- gt::gt(out) %>%
+        gt::fmt_number(columns = where(is.numeric), decimals = 4) %>%
+        gt::tab_header(
+          title = "Recovery Analysis: Pairwise Contrasts",
+          subtitle = paste(
+            "Endpoint:", input$recovery_endpoint,
+            "| Baseline Week:", input$recovery_baseline_week,
+            "| Recovery Week:", input$recovery_recovery_week
+          )
+        )
+      
+      # Shiny's 'file' argument usually lacks an extension.
       temp_png <- tempfile(fileext = ".png")
       
-      # Save to that known .png path
       gt::gtsave(gt_tbl, filename = temp_png)
       
-      # Copy the correctly generated PNG to the Shiny download location
-      file.copy(temp_png, file)
+      file.copy(temp_png, file, overwrite = TRUE)
     }
   )
   
@@ -7905,19 +7956,20 @@ server <- function(input, output, session) {
   # DiD runner: handles all modes and baselines, incl. NEW untreated_ctrl baseline
   # -----------------------------------------------------------------------------
   observeEvent(input$run_did, {
-    message("=== DID START (consolidated) ===")
+    message("DID START consolidated")
     did_state(NULL)
     
-    ds <- input$did_dataset
-    ep <- input$did_endpoint
+    ds   <- input$did_dataset
+    ep   <- input$did_endpoint
     mode <- input$did_mode
+    
     if (is.null(ds) || is.null(ep) || is.null(mode)) {
       return(safe_abort("Select dataset, endpoint, and mode before running DiD."))
     }
     
     # Base (un-subset) and pre-filtered (sample/tissue + dose) frames
     df0 <- did_base_data_norm()
-    df <- did_data_filtered()
+    df  <- did_data_filtered()
     message("[DiD] Base rows: ", nrow(df0), " | Pre-filtered rows: ", nrow(df))
     
     # Optional fiber/treatment subset filters not required by the chosen contrast
@@ -7926,6 +7978,7 @@ server <- function(input, output, session) {
       df <- df %>% dplyr::filter(fiber_type %in% input$did_fibers_filter)
       message("[DiD] After optional fiber subset: ", nrow(df))
     }
+    
     if (!(identical(mode, "across_fiber") && identical(input$did_across_fiber_contrast, "did")) &&
         !identical(mode, "across_week") &&
         !identical(mode, "across_treatment") &&
@@ -7933,6 +7986,7 @@ server <- function(input, output, session) {
       df <- df %>% dplyr::filter(chem_treatment %in% input$did_treatments_filter)
       message("[DiD] After optional treatment subset: ", nrow(df))
     }
+    
     if (nrow(df) == 0) {
       return(safe_abort("No data after optional subsets."))
     }
@@ -7941,10 +7995,12 @@ server <- function(input, output, session) {
     # Mode-specific subsetting
     # -----------------------------
     if (identical(mode, "across_fiber")) {
+      
       wk <- safe_int1(input$did_week_select)
       if (is.na(wk)) {
         return(safe_abort("Select a week for Across Fiber DiD."))
       }
+      
       df <- df %>%
         dplyr::filter(
           week == wk,
@@ -7952,9 +8008,12 @@ server <- function(input, output, session) {
         )
       message("[DiD] Across_fiber rows at week ", wk, ": ", nrow(df))
       
-      # Branch A: Dose-based DiD (treated(dose) - untreated(0)) difference across fibers
+      # ------------------------------------------------------------------
+      # Branch A: Dose-based DiD across fibers
+      # ------------------------------------------------------------------
       if (identical(input$did_baseline_type, "dose")) {
         dose_chosen <- as.character(input$did_treated_dose)
+        
         df <- df %>%
           dplyr::filter(
             chem_treatment %in% c("untreated", "treated"),
@@ -7977,6 +8036,7 @@ server <- function(input, output, session) {
         rhs <- "chem_treatment * fiber_type * fiber_concentration_label"
         if (has_two("sample_type")) rhs <- paste(rhs, "+ sample_type")
         form <- stats::as.formula(paste("outcome ~", rhs))
+        
         mdl <- tryCatch(stats::lm(form, data = df), error = function(e) e)
         if (inherits(mdl, "error")) {
           return(safe_abort(paste("Model failed:", mdl$message)))
@@ -7991,9 +8051,9 @@ server <- function(input, output, session) {
         a <- input$did_fiber_a
         b <- input$did_fiber_b
         need <- rbind(
-          c("treated", a, dose_chosen),
+          c("treated",   a, dose_chosen),
           c("untreated", a, "0"),
-          c("treated", b, dose_chosen),
+          c("treated",   b, dose_chosen),
           c("untreated", b, "0")
         )
         have_key <- paste(emm_tbl$chem_treatment, emm_tbl$fiber_type, emm_tbl$fiber_concentration_label, sep = ".")
@@ -8004,14 +8064,21 @@ server <- function(input, output, session) {
         
         # Weights: (Trt,A,dose) - (Ctrl,A,0) - (Trt,B,dose) + (Ctrl,B,0)
         w <- rep(0, nrow(emm_tbl))
-        sel <- function(tr, fi, doz) emm_tbl$chem_treatment == tr & emm_tbl$fiber_type == fi & emm_tbl$fiber_concentration_label == doz
-        w[sel("treated", a, dose_chosen)] <- 1
-        w[sel("untreated", a, "0")] <- -1
-        w[sel("treated", b, dose_chosen)] <- -1
-        w[sel("untreated", b, "0")] <- 1
+        sel <- function(tr, fi, doz) emm_tbl$chem_treatment == tr &
+          emm_tbl$fiber_type == fi &
+          emm_tbl$fiber_concentration_label == doz
+        w[sel("treated",   a, dose_chosen)] <-  1
+        w[sel("untreated", a, "0")]         <- -1
+        w[sel("treated",   b, dose_chosen)] <- -1
+        w[sel("untreated", b, "0")]         <-  1
         
-        did <- if (!is.null(emm3)) tryCatch(emmeans::contrast(emm3, method = list(did_dose = w), by = NULL), error = function(e) NULL) else NULL
-        did_tbl <- if (!is.null(did)) tryCatch(as.data.frame(did), error = function(e) NULL) else NULL
+        did_obj <- if (!is.null(emm3)) {
+          tryCatch(emmeans::contrast(emm3, method = list(did_dose = w), by = NULL), error = function(e) NULL)
+        } else {
+          NULL
+        }
+        
+        did_tbl <- if (!is.null(did_obj)) tryCatch(as.data.frame(did_obj), error = function(e) NULL) else NULL
         if (!is.null(did_tbl) && "p.value" %in% names(did_tbl)) {
           method <- input$did_p_adjust %||% "none"
           did_tbl$p_adjust_method <- method
@@ -8019,14 +8086,20 @@ server <- function(input, output, session) {
         }
         
         did_state(list(
-          model = mdl, data = df, emmeans_tbl = emm_tbl, did_tbl = did_tbl,
-          mode = "across_fiber", baseline = "dose"
+          model       = mdl,
+          data        = df,
+          emmeans_tbl = emm_tbl,
+          did_tbl     = did_tbl,
+          mode        = "across_fiber",
+          baseline    = "dose"
         ))
-        message("=== DID DONE (dose-based) ===")
+        message("=== DID DONE (dose-based across_fiber) ===")
         return(invisible(NULL))
       }
       
-      # Branch B: NEW untreated_ctrl control-offset within untreated
+      # ------------------------------------------------------------------
+      # Branch B: untreated_ctrl control-offset across fibers
+      # ------------------------------------------------------------------
       if (identical(input$did_baseline_type, "untreated_ctrl")) {
         dose_chosen <- as.character(input$did_treated_dose %||% "100")
         
@@ -8051,6 +8124,7 @@ server <- function(input, output, session) {
         rhs <- "fiber_type * fiber_concentration_label"
         if (has_two("sample_type")) rhs <- paste(rhs, "+ sample_type")
         form <- stats::as.formula(paste("outcome ~", rhs))
+        
         mdl <- tryCatch(stats::lm(form, data = df_uc), error = function(e) e)
         if (inherits(mdl, "error")) {
           return(safe_abort(paste("Model failed:", mdl$message)))
@@ -8066,8 +8140,10 @@ server <- function(input, output, session) {
         b <- input$did_fiber_b
         have_key <- paste(emm_tbl$fiber_type, emm_tbl$fiber_concentration_label, sep = ".")
         need_key <- c(
-          paste(a, dose_chosen, sep = "."), paste(a, "0", sep = "."),
-          paste(b, dose_chosen, sep = "."), paste(b, "0", sep = ".")
+          paste(a, dose_chosen, sep = "."),
+          paste(a, "0",          sep = "."),
+          paste(b, dose_chosen, sep = "."),
+          paste(b, "0",          sep = ".")
         )
         if (!all(need_key %in% have_key)) {
           return(safe_abort("Missing untreated cells (fiber × {0, dose})."))
@@ -8075,10 +8151,10 @@ server <- function(input, output, session) {
         
         # Weights: [untreated(dose) - untreated(0)]_A - [untreated(dose) - untreated(0)]_B
         w <- rep(0, length(have_key))
-        w[have_key == paste(a, dose_chosen, sep = ".")] <- 1
-        w[have_key == paste(a, "0", sep = ".")] <- -1
+        w[have_key == paste(a, dose_chosen, sep = ".")] <-  1
+        w[have_key == paste(a, "0",          sep = ".")] <- -1
         w[have_key == paste(b, dose_chosen, sep = ".")] <- -1
-        w[have_key == paste(b, "0", sep = ".")] <- 1
+        w[have_key == paste(b, "0",          sep = ".")] <-  1
         
         did_uc <- if (!is.null(emm2)) {
           tryCatch(
@@ -8088,7 +8164,129 @@ server <- function(input, output, session) {
         } else {
           NULL
         }
+        
         did_tbl <- if (!is.null(did_uc)) tryCatch(as.data.frame(did_uc), error = function(e) NULL) else NULL
+        if (!is.null(did_tbl) && "p.value" %in% names(did_tbl)) {
+          method <- input$did_p_adjust %||% "none"
+          did_tbl$p_adjust_method <- method
+          did_tbl$p_adj <- stats::p.adjust(did_tbl$p.value, method = method)
+        }
+        
+        did_state(list(
+          model       = mdl,
+          data        = df_uc,
+          emmeans_tbl = emm_tbl,
+          did_tbl     = did_tbl,
+          mode        = "across_fiber",
+          baseline    = "untreated_ctrl",
+          dose_chosen = dose_chosen
+        ))
+        message("=== DID DONE (untreated control-offset across_fiber) ===")
+        return(invisible(NULL))
+      }
+      
+      # Optional single-treatment fiber contrast (no DiD)
+      if (identical(input$did_across_fiber_contrast, "single_trt") &&
+          !is.null(input$did_single_treatment)) {
+        df <- df %>% dplyr::filter(chem_treatment == input$did_single_treatment)
+        message("[DiD] Across_fiber single-trt subset: ", nrow(df))
+      }
+      
+    } else if (identical(mode, "across_week")) {
+      
+      wk_a <- safe_int1(input$did_week_a)
+      wk_b <- safe_int1(input$did_week_b)
+      if (anyNA(c(wk_a, wk_b))) {
+        return(safe_abort("Select both Week A and Week B."))
+      }
+      
+      df <- df %>%
+        dplyr::filter(
+          week %in% c(wk_a, wk_b),
+          fiber_type == input$did_fiber_select
+        )
+      message(
+        "[DiD] Across_week rows at weeks ",
+        paste(c(wk_a, wk_b), collapse = ", "),
+        ": ", nrow(df)
+      )
+      
+      # ------------------------------------------------------------------
+      # NEW: Dose-based DiD across weeks within a fiber
+      # ------------------------------------------------------------------
+      if (identical(input$did_baseline_type, "dose")) {
+        
+        dose_chosen <- as.character(input$did_treated_dose)
+        
+        df_dose <- df %>%
+          dplyr::filter(
+            chem_treatment %in% c("untreated", "treated"),
+            fiber_concentration_label %in% c("0", dose_chosen)
+          ) %>%
+          dplyr::mutate(
+            week = factor(week),
+            chem_treatment = factor(chem_treatment, levels = c("untreated", "treated")),
+            fiber_concentration_label = factor(fiber_concentration_label, levels = c("0", dose_chosen)),
+            sample_type = factor(sample_type)
+          ) %>%
+          droplevels()
+        
+        if (nrow(df_dose) == 0) {
+          return(safe_abort("No rows after filters for Across Week dose-based DiD."))
+        }
+        
+        has_two <- function(v) v %in% names(df_dose) && dplyr::n_distinct(stats::na.omit(df_dose[[v]])) >= 2
+        if (!all(c(has_two("chem_treatment"), has_two("week"), has_two("fiber_concentration_label")))) {
+          return(safe_abort("Need both treatments, both weeks, and doses {0 and selected} for across-week dose-based DiD."))
+        }
+        
+        rhs <- "chem_treatment * week * fiber_concentration_label"
+        if (has_two("sample_type")) rhs <- paste(rhs, "+ sample_type")
+        form <- stats::as.formula(paste("outcome ~", rhs))
+        
+        mdl <- tryCatch(stats::lm(form, data = df_dose), error = function(e) e)
+        if (inherits(mdl, "error")) {
+          return(safe_abort(paste("Model failed:", mdl$message)))
+        }
+        
+        emm3 <- safe_emmeans(mdl, ~ chem_treatment * week * fiber_concentration_label)
+        emm_tbl <- if (!is.null(emm3)) tryCatch(as.data.frame(emm3), error = function(e) NULL) else NULL
+        if (is.null(emm_tbl) || nrow(emm_tbl) == 0) {
+          return(safe_abort("EMMeans grid is empty for across-week dose-based DiD."))
+        }
+        
+        have_key <- paste(emm_tbl$chem_treatment, emm_tbl$week, emm_tbl$fiber_concentration_label, sep = ".")
+        wa <- as.character(wk_a)
+        wb <- as.character(wk_b)
+        
+        need <- rbind(
+          c("treated",   wb, dose_chosen),
+          c("untreated", wb, "0"),
+          c("treated",   wa, dose_chosen),
+          c("untreated", wa, "0")
+        )
+        need_key <- apply(need, 1, paste, collapse = ".")
+        
+        if (!all(need_key %in% have_key)) {
+          return(safe_abort("Missing cells for across-week dose-based DiD; widen filters or pick another dose."))
+        }
+        
+        # Weights: [Trt,WeekB,dose - Ctrl,WeekB,0] - [Trt,WeekA,dose - Ctrl,WeekA,0]
+        w <- rep(0, length(have_key))
+        w[have_key == paste("treated",   wb, dose_chosen, sep = ".")] <-  1
+        w[have_key == paste("untreated", wb, "0",         sep = ".")] <- -1
+        w[have_key == paste("treated",   wa, dose_chosen, sep = ".")] <- -1
+        w[have_key == paste("untreated", wa, "0",         sep = ".")] <-  1
+        
+        did_obj <- if (!is.null(emm3)) {
+          tryCatch(
+            emmeans::contrast(emm3, method = list(did_dose = w), by = NULL),
+            error = function(e) NULL
+          )
+        } else {
+          NULL
+        }
+        did_tbl <- if (!is.null(did_obj)) tryCatch(as.data.frame(did_obj), error = function(e) NULL) else NULL
         
         if (!is.null(did_tbl) && "p.value" %in% names(did_tbl)) {
           method <- input$did_p_adjust %||% "none"
@@ -8097,36 +8295,23 @@ server <- function(input, output, session) {
         }
         
         did_state(list(
-          model        = mdl,
-          data         = df_uc,
-          emmeans_tbl  = emm_tbl,
-          did_tbl      = did_tbl,
-          mode         = "across_fiber",
-          baseline     = "untreated_ctrl",
-          dose_chosen  = dose_chosen
+          model       = mdl,
+          data        = df_dose,
+          emmeans_tbl = emm_tbl,
+          did_tbl     = did_tbl,
+          mode        = "across_week",
+          baseline    = "dose",
+          dose_chosen = dose_chosen
         ))
-        message("=== DID DONE (untreated control-offset) ===")
+        message("=== DID DONE (dose-based across_week) ===")
         return(invisible(NULL))
       }
       
-      # Optional single-treatment fiber contrast path (no DiD)
-      if (identical(input$did_across_fiber_contrast, "single_trt") && !is.null(input$did_single_treatment)) {
-        df <- df %>% dplyr::filter(chem_treatment == input$did_single_treatment)
-        message("[DiD] Across_fiber single-trt subset: ", nrow(df))
-      }
-    } else if (identical(mode, "across_week")) {
-      wk_a <- safe_int1(input$did_week_a)
-      wk_b <- safe_int1(input$did_week_b)
-      if (anyNA(c(wk_a, wk_b))) {
-        return(safe_abort("Select both Week A and Week B."))
-      }
-      df <- df %>%
-        dplyr::filter(
-          week %in% c(wk_a, wk_b),
-          fiber_type == input$did_fiber_select
-        )
-      message("[DiD] Across_week rows at weeks ", paste(c(wk_a, wk_b), collapse = ", "), ": ", nrow(df))
-    } else { # across_treatment
+      # If baseline is not dose, fall through and use generic across_week DiD
+      # (handled later in the common contrast section).
+      
+    } else {  # across_treatment
+      
       wk <- safe_int1(input$did_week_select)
       if (is.na(wk)) {
         return(safe_abort("Select a week for Across Treatment DiD."))
@@ -8137,20 +8322,24 @@ server <- function(input, output, session) {
           fiber_type == input$did_fiber_select,
           chem_treatment %in% c(input$did_trt_a, input$did_trt_b)
         )
-      message("[DiD] Across_treatment rows at week ", wk, " within fiber ", input$did_fiber_select, ": ", nrow(df))
+      message("[DiD] Across_treatment rows at week ", wk,
+              " within fiber ", input$did_fiber_select, ": ", nrow(df))
     }
     
     if (nrow(df) == 0) {
       return(safe_abort("No rows after mode-specific subsetting."))
     }
     
-    # Smart pooling: retry without sample/tissue filter if coverage is insufficient
+    # -----------------------------
+    # Smart pooling for coverage
+    # -----------------------------
     has_both <- function(v) v %in% names(df) && nlev2(df[[v]]) >= 2
     needs_both_trt <- (identical(mode, "across_fiber") && identical(input$did_across_fiber_contrast, "did")) ||
       identical(mode, "across_week") || identical(mode, "across_treatment")
     needs_both_fib <- identical(mode, "across_fiber")
     
-    coverage_ok <- (!needs_both_fib || has_both("fiber_type")) && (!needs_both_trt || has_both("chem_treatment"))
+    coverage_ok <- (!needs_both_fib || has_both("fiber_type")) &&
+      (!needs_both_trt || has_both("chem_treatment"))
     if (!coverage_ok) {
       message("[DiD] Coverage insufficient; retrying without sample/tissue filter")
       df <- did_base_data_norm()
@@ -8166,24 +8355,32 @@ server <- function(input, output, session) {
       # Re-apply mode-specific subset
       if (identical(mode, "across_fiber")) {
         wk <- safe_int1(input$did_week_select)
-        df <- df %>% dplyr::filter(week == wk, fiber_type %in% c(input$did_fiber_a, input$did_fiber_b))
-        if (identical(input$did_across_fiber_contrast, "single_trt") && !is.null(input$did_single_treatment)) {
+        df <- df %>% dplyr::filter(
+          week == wk,
+          fiber_type %in% c(input$did_fiber_a, input$did_fiber_b)
+        )
+        if (identical(input$did_across_fiber_contrast, "single_trt") &&
+            !is.null(input$did_single_treatment)) {
           df <- df %>% dplyr::filter(chem_treatment == input$did_single_treatment)
         }
       } else if (identical(mode, "across_week")) {
         wk_a <- safe_int1(input$did_week_a)
         wk_b <- safe_int1(input$did_week_b)
-        df <- df %>% dplyr::filter(week %in% c(wk_a, wk_b), fiber_type == input$did_fiber_select)
-      } else { # across_treatment
+        df <- df %>% dplyr::filter(
+          week %in% c(wk_a, wk_b),
+          fiber_type == input$did_fiber_select
+        )
+      } else {  # across_treatment
         wk <- safe_int1(input$did_week_select)
-        df <- df %>%
-          dplyr::filter(
-            week == wk, fiber_type == input$did_fiber_select,
-            chem_treatment %in% c(input$did_trt_a, input$did_trt_b)
-          )
+        df <- df %>% dplyr::filter(
+          week == wk,
+          fiber_type == input$did_fiber_select,
+          chem_treatment %in% c(input$did_trt_a, input$did_trt_b)
+        )
       }
       
-      coverage_ok <- (!needs_both_fib || has_both("fiber_type")) && (!needs_both_trt || has_both("chem_treatment"))
+      coverage_ok <- (!needs_both_fib || has_both("fiber_type")) &&
+        (!needs_both_trt || has_both("chem_treatment"))
       if (!coverage_ok) {
         return(safe_abort("Not enough data to estimate the requested contrast; widen filters."))
       }
@@ -8200,9 +8397,9 @@ server <- function(input, output, session) {
       ) %>%
       droplevels()
     
-    # ---------------------------------------------------------------------------
-    # Build formula based on varied covariates (completes the truncated section)
-    # ---------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Build formula for remaining generic DiD contrasts
+    # ------------------------------------------------------------------
     has_varied <- function(v) v %in% names(df) && length(levels(df[[v]])) >= 2
     
     if (identical(mode, "across_fiber")) {
@@ -8217,31 +8414,31 @@ server <- function(input, output, session) {
       }
       rhs <- "chem_treatment * week"
       if (has_varied("sample_type")) rhs <- paste(rhs, "+ sample_type")
-    } else { # across_treatment
+    } else {  # across_treatment
       if (!has_varied("chem_treatment")) {
         return(safe_abort("Need both selected treatments present for Across Treatment within this fiber."))
       }
       rhs <- "chem_treatment"
       if (has_varied("sample_type")) rhs <- paste(rhs, "+ sample_type")
     }
+    
     form <- stats::as.formula(paste("outcome ~", rhs))
     
-    # Fit model safely
     mdl <- tryCatch(stats::lm(form, data = df), error = function(e) e)
     if (inherits(mdl, "error")) {
       return(safe_abort(paste("Model failed:", mdl$message)))
     }
-    message("[DiD] Model fit OK; n=", nrow(df))
+    message("[DiD] Model fit OK; n = ", nrow(df))
     
-    # Defensive EMMeans and contrasts for each mode
     emm_tbl <- did_tbl <- NULL
     
     if (identical(mode, "across_fiber")) {
+      
       emm2 <- safe_emmeans(mdl, ~ chem_treatment * fiber_type)
       emm_tbl <- if (!is.null(emm2)) tryCatch(as.data.frame(emm2), error = function(e) NULL) else NULL
       
       fibers_needed <- unique(c(input$did_fiber_a, input$did_fiber_b))
-      trts_needed <- c("untreated", "treated")
+      trts_needed   <- c("untreated", "treated")
       have_cells <- if (!is.null(emm_tbl)) paste(emm_tbl$chem_treatment, emm_tbl$fiber_type, sep = ".") else character(0)
       need_cells <- as.vector(outer(trts_needed, fibers_needed, paste, sep = "."))
       if (!all(need_cells %in% have_cells)) {
@@ -8251,10 +8448,10 @@ server <- function(input, output, session) {
       a <- input$did_fiber_a
       b <- input$did_fiber_b
       w <- rep(0, length(have_cells))
-      w[have_cells == paste("treated", a, sep = ".")] <- 1
+      w[have_cells == paste("treated",   a, sep = ".")] <-  1
       w[have_cells == paste("untreated", a, sep = ".")] <- -1
-      w[have_cells == paste("treated", b, sep = ".")] <- -1
-      w[have_cells == paste("untreated", b, sep = ".")] <- 1
+      w[have_cells == paste("treated",   b, sep = ".")] <- -1
+      w[have_cells == paste("untreated", b, sep = ".")] <-  1
       
       did_tbl <- if (!is.null(emm2)) {
         tryCatch(
@@ -8264,7 +8461,9 @@ server <- function(input, output, session) {
       } else {
         NULL
       }
+      
     } else if (identical(mode, "across_week")) {
+      
       emm2 <- safe_emmeans(mdl, ~ chem_treatment * week)
       emm_tbl <- if (!is.null(emm2)) tryCatch(as.data.frame(emm2), error = function(e) NULL) else NULL
       
@@ -8278,10 +8477,10 @@ server <- function(input, output, session) {
       }
       
       w <- rep(0, length(have_cells))
-      w[have_cells == paste("treated", wb, sep = ".")] <- 1
+      w[have_cells == paste("treated",   wb, sep = ".")] <-  1
       w[have_cells == paste("untreated", wb, sep = ".")] <- -1
-      w[have_cells == paste("treated", wa, sep = ".")] <- -1
-      w[have_cells == paste("untreated", wa, sep = ".")] <- 1
+      w[have_cells == paste("treated",   wa, sep = ".")] <- -1
+      w[have_cells == paste("untreated", wa, sep = ".")] <-  1
       
       did_tbl <- if (!is.null(emm2)) {
         tryCatch(
@@ -8291,8 +8490,10 @@ server <- function(input, output, session) {
       } else {
         NULL
       }
-    } else { # across_treatment within selected fiber
-      emm2 <- safe_emmeans(mdl, ~chem_treatment)
+      
+    } else {  # across_treatment
+      
+      emm2 <- safe_emmeans(mdl, ~ chem_treatment)
       emm_tbl <- if (!is.null(emm2)) tryCatch(as.data.frame(emm2), error = function(e) NULL) else NULL
       
       ta <- input$did_trt_a
@@ -8302,7 +8503,7 @@ server <- function(input, output, session) {
         return(safe_abort("Selected treatments not both present for the chosen fiber; widen filters."))
       }
       
-      w_named <- stats::setNames(c(1, -1), c(ta, tb)) # TrtA − TrtB
+      w_named <- stats::setNames(c(1, -1), c(ta, tb))  # TrtA − TrtB
       did_tbl <- if (!is.null(emm2)) {
         tryCatch(
           as.data.frame(emmeans::contrast(emm2, method = list(treatment_effect = w_named), by = NULL)),
@@ -8320,76 +8521,191 @@ server <- function(input, output, session) {
       did_tbl$p_adj <- stats::p.adjust(did_tbl$p.value, method = method)
     }
     
-    # Save state for outputs
-    did_state(list(model = mdl, data = df, emmeans_tbl = emm_tbl, did_tbl = did_tbl, mode = mode))
+    did_state(list(
+      model       = mdl,
+      data        = df,
+      emmeans_tbl = emm_tbl,
+      did_tbl     = did_tbl,
+      mode        = mode
+    ))
     message("=== DID DONE (consolidated) ===")
   })
   
-  # Outputs (unchanged IDs)
-  output$did_summary <- renderPrint({
-    res <- did_state()
-    if (is.null(res)) {
-      cat("Click 'Run DiD Analysis'\n")
-      return()
-    }
-    if (!is.null(res$error)) {
-      cat("Error:", res$error, "\n")
-      return()
-    }
-    cat("DiD Mode:", res$mode, "\n")
-    print(summary(res$model))
-  })
-  
-  output$did_table <- DT::renderDataTable({
-    res <- did_state()
-    if (is.null(res)) {
-      return(NULL)
-    }
-    if (!is.null(res$error)) {
-      return(DT::datatable(data.frame(Message = res$error), rownames = FALSE))
-    }
-    if (is.null(res$did_tbl) || nrow(res$did_tbl) == 0) {
-      return(DT::datatable(data.frame(Message = "No DiD rows for current settings."), rownames = FALSE))
-    }
-    DT::datatable(res$did_tbl, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
-  })
-  
-  output$did_emm_table <- DT::renderDataTable({
-    res <- did_state()
-    if (is.null(res)) {
-      return(NULL)
-    }
-    if (!is.null(res$error)) {
-      return(DT::datatable(data.frame(Message = res$error), rownames = FALSE))
-    }
-    if (is.null(res$emmeans_tbl) || nrow(res$emmeans_tbl) == 0) {
-      return(DT::datatable(data.frame(Message = "No EMMeans grid for current settings."), rownames = FALSE))
-    }
-    DT::datatable(res$emmeans_tbl, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
+  did_plot_obj <- reactive({
+    did_res <- did_state()
+    validate(need(!is.null(did_res), "Run DiD Analysis first."))
+    validate(need(is.null(did_res$error), did_res$error))
+    
+    df_plot <- did_res$data
+    validate(need(!is.null(df_plot) && nrow(df_plot) > 0, "No data to plot."))
+    
+    df_plot$chem_treatment <- factor(df_plot$chem_treatment, levels = c("untreated", "treated"))
+    
+    ggplot2::ggplot(
+      df_plot,
+      ggplot2::aes(x = chem_treatment, y = outcome, color = fiber_type)
+    ) +
+      ggplot2::stat_summary(
+        fun = mean,
+        geom = "point",
+        size = 3,
+        position = ggplot2::position_dodge(width = 0.35)
+      ) +
+      ggplot2::stat_summary(
+        fun.data = function(y) {
+          mean_y <- mean(y, na.rm = TRUE)
+          sd_y   <- stats::sd(y, na.rm = TRUE)
+          n_y    <- sum(stats::complete.cases(y))
+          data.frame(
+            y    = mean_y,
+            ymin = mean_y - sd_y / sqrt(n_y),
+            ymax = mean_y + sd_y / sqrt(n_y)
+          )
+        },
+        geom     = "errorbar",
+        width    = 0.2,
+        position = ggplot2::position_dodge(width = 0.35)
+      ) +
+      ggplot2::geom_line(
+        ggplot2::aes(group = fiber_type),
+        size     = 1,
+        position = ggplot2::position_dodge(width = 0.35)
+      ) +
+      ggplot2::facet_wrap(~ week, nrow = 1, scales = "free_y") +
+      ggplot2::thememinimal() +
+      ggplot2::labs(
+        title = "did_visualization",
+        x     = "treatment",
+        y     = "outcome"
+      )
   })
   
   output$did_plot <- renderPlot({
-    res <- did_state()
-    validate(need(!is.null(res), ""))
-    dfp <- res$data
-    validate(need(!is.null(dfp) && nrow(dfp) > 0, "No data to plot."))
-    ggplot2::ggplot(dfp, ggplot2::aes(x = chem_treatment, y = outcome, color = fiber_type)) +
-      ggplot2::stat_summary(
-        fun = mean, geom = "point", size = 3,
-        position = ggplot2::position_dodge(width = 0.35)
-      ) +
-      ggplot2::stat_summary(
-        fun.data = ~ c(
-          y = mean(.), ymin = mean(.) - sd(.) / sqrt(length(.)),
-          ymax = mean(.) + sd(.) / sqrt(length(.))
-        ),
-        geom = "errorbar", width = 0.2,
-        position = ggplot2::position_dodge(width = 0.35)
-      ) +
-      ggplot2::facet_wrap(~week, nrow = 1, scales = "free_y") +
-      ggplot2::theme_minimal() +
-      ggplot2::labs(title = "DiD visualization", x = "Treatment", y = "Outcome")
+    did_plot_obj()
   })
+  
+  output$did_summary <- renderPrint({
+    did_res <- did_state()
+    if (is.null(did_res)) {
+      cat("Click Run DiD Analysis")
+      return(invisible(NULL))
+    }
+    if (!is.null(did_res$error)) {
+      cat("Error:", did_res$error)
+      return(invisible(NULL))
+    }
+    cat("DiD mode:", did_res$mode, " | baseline:", did_res$baseline, "\n\n")
+    print(summary(did_res$model))
+  })
+  
+  output$did_table <- DT::renderDataTable({
+    did_res <- did_state()
+    if (is.null(did_res) || !is.null(did_res$error)) {
+      return(NULL)
+    }
+    did_tbl <- did_res$did_tbl
+    if (is.null(did_tbl) || nrow(did_tbl) == 0) {
+      return(DT::datatable(
+        data.frame(message = "No DiD rows for current settings."),
+        rownames = FALSE
+      ))
+    }
+    DT::datatable(
+      did_tbl,
+      options  = list(pageLength = 10, scrollX = TRUE),
+      rownames = FALSE
+    )
+  })
+  
+  output$did_emm_table <- DT::renderDataTable({
+    did_res <- did_state()
+    if (is.null(did_res) || !is.null(did_res$error)) {
+      return(NULL)
+    }
+    emm_tbl <- did_res$emmeans_tbl
+    if (is.null(emm_tbl) || nrow(emm_tbl) == 0) {
+      return(DT::datatable(
+        data.frame(message = "No EMMeans grid for current settings."),
+        rownames = FALSE
+      ))
+    }
+    DT::datatable(
+      emm_tbl,
+      options  = list(pageLength = 10, scrollX = TRUE),
+      rownames = FALSE
+    )
+  })
+  
+  # ---------- PNG download handlers ----------------------------------------------
+  
+  output$download_did_plot_png <- downloadHandler(
+    filename = function() {
+      paste0("did_visualization_", Sys.Date(), ".png")
+    },
+    content = function(file) {
+      plot_obj <- did_plot_obj()
+      ggplot2::ggsave(
+        filename = file,
+        plot     = plot_obj,
+        width    = 8,
+        height   = 6,
+        units    = "in",
+        dpi      = 300,
+        bg       = "white",
+        device   = "png"
+      )
+    }
+  )
+  
+  output$download_did_table_png <- downloadHandler(
+    filename = function() {
+      paste0("did_results_", Sys.Date(), ".png")
+    },
+    content = function(file) {
+      did_res <- did_state()
+      validate(need(!is.null(did_res), "Run DiD Analysis first."))
+      validate(need(is.null(did_res$error), did_res$error))
+      
+      did_tbl <- did_res$did_tbl
+      validate(need(!is.null(did_tbl) && nrow(did_tbl) > 0, "No DiD table to export."))
+      
+      gt_tbl <- gt::gt(did_tbl)
+      gt_tbl <- gt::fmt_number(gt_tbl, columns = where(is.numeric), decimals = 4)
+      gt_tbl <- gt::tab_header(
+        gt_tbl,
+        title = gt::md("Difference-in-differences results")
+      )
+      
+      temp_png <- tempfile(fileext = ".png")
+      gt::gtsave(gt_tbl, filename = temp_png)
+      file.copy(temp_png, file, overwrite = TRUE)
+    }
+  )
+  
+  output$download_did_emm_table_png <- downloadHandler(
+    filename = function() {
+      paste0("did_emmeans_", Sys.Date(), ".png")
+    },
+    content = function(file) {
+      did_res <- did_state()
+      validate(need(!is.null(did_res), "Run DiD Analysis first."))
+      validate(need(is.null(did_res$error), did_res$error))
+      
+      emm_tbl <- did_res$emmeans_tbl
+      validate(need(!is.null(emm_tbl) && nrow(emm_tbl) > 0, "No EMMeans table to export."))
+      
+      gt_tbl <- gt::gt(emm_tbl)
+      gt_tbl <- gt::fmt_number(gt_tbl, columns = where(is.numeric), decimals = 4)
+      gt_tbl <- gt::tab_header(
+        gt_tbl,
+        title = gt::md("did_emmeans_grid")
+      )
+      
+      temp_png <- tempfile(fileext = ".png")
+      gt::gtsave(gt_tbl, filename = temp_png)
+      file.copy(temp_png, file, overwrite = TRUE)
+    }
+  )
   
   # Memory cleanup
   onStop(function() {
