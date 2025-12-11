@@ -129,6 +129,35 @@ create_table_download_handler <- function(
   )
 }
 
+# Factory: render a data frame to a PNG with basic numeric formatting
+create_table_png_download_handler <- function(
+    table_reactive,
+    base_filename = "table",
+    title = NULL
+) {
+  shiny::downloadHandler(
+    filename = function() paste0(base_filename, "_", Sys.Date(), ".png"),
+    contentType = "image/png",
+    content = function(file) {
+      df <- table_reactive()
+      validate(need(!is.null(df) && nrow(df) > 0, "No data to export."))
+      
+      gt_tbl <- gt::gt(df)
+      numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+      if (length(numeric_cols) > 0) {
+        gt_tbl <- gt::fmt_number(gt_tbl, columns = numeric_cols, decimals = 4)
+      }
+      if (!is.null(title)) {
+        gt_tbl <- gt::tab_header(gt_tbl, title = gt::md(title))
+      }
+      
+      temp_png <- tempfile(fileext = ".png")
+      gt::gtsave(gt_tbl, filename = temp_png)
+      file.copy(temp_png, file, overwrite = TRUE)
+    }
+  )
+}
+
 # ----- Defensive emmeans/contrasts helpers (add once in server) -----
 
 safe_emmeans <- function(model, specs, at = NULL, by = NULL) {
@@ -1649,7 +1678,7 @@ ui <- fluidPage(
                   # NEW: DiD result table PNG download
                   downloadButton(
                     outputId = "download_did_table_png",
-                    label    = "Download DiD table PNG",
+                    label    = "Download DiD table (PNG)",
                     class    = "btn-sm btn-warning"
                   )
                 ),
@@ -1660,7 +1689,7 @@ ui <- fluidPage(
                   # NEW: EMMeans grid table PNG download
                   downloadButton(
                     outputId = "download_did_emm_table_png",
-                    label    = "Download EMMeans table PNG",
+                    label    = "Download EMMeans table (PNG)",
                     class    = "btn-sm btn-warning"
                   )
                 ),
@@ -1671,7 +1700,7 @@ ui <- fluidPage(
                   # NEW: DiD visualization plot PNG download
                   downloadButton(
                     outputId = "download_did_plot_png",
-                    label    = "Download plot PNG",
+                    label    = "Download plot (PNG)",
                     class    = "btn-sm btn-primary"
                   )
                 )
@@ -8536,47 +8565,52 @@ server <- function(input, output, session) {
     validate(need(!is.null(did_res), "Run DiD Analysis first."))
     validate(need(is.null(did_res$error), did_res$error))
     
-    df_plot <- did_res$data
-    validate(need(!is.null(df_plot) && nrow(df_plot) > 0, "No data to plot."))
+    emm_tbl <- did_res$emmeans_tbl
+    validate(need(!is.null(emm_tbl) && nrow(emm_tbl) > 0, "No EMM grid available to plot."))
     
-    df_plot$chem_treatment <- factor(df_plot$chem_treatment, levels = c("untreated", "treated"))
+    df_plot <- dplyr::mutate(
+      emm_tbl,
+      chem_treatment = factor(chem_treatment, levels = c("untreated", "treated")),
+      week = factor(week)
+    )
     
-    ggplot2::ggplot(
+    pos <- ggplot2::position_dodge(width = 0.25)
+    has_ci <- all(c("lower.CL", "upper.CL") %in% names(df_plot))
+    
+    p <- ggplot2::ggplot(
       df_plot,
-      ggplot2::aes(x = chem_treatment, y = outcome, color = fiber_type)
+      ggplot2::aes(x = chem_treatment, y = emmean, color = fiber_type, group = fiber_type)
     ) +
-      ggplot2::stat_summary(
-        fun = mean,
-        geom = "point",
-        size = 3,
-        position = ggplot2::position_dodge(width = 0.35)
-      ) +
-      ggplot2::stat_summary(
-        fun.data = function(y) {
-          mean_y <- mean(y, na.rm = TRUE)
-          sd_y   <- stats::sd(y, na.rm = TRUE)
-          n_y    <- sum(stats::complete.cases(y))
-          data.frame(
-            y    = mean_y,
-            ymin = mean_y - sd_y / sqrt(n_y),
-            ymax = mean_y + sd_y / sqrt(n_y)
-          )
-        },
-        geom     = "errorbar",
-        width    = 0.2,
-        position = ggplot2::position_dodge(width = 0.35)
-      ) +
-      ggplot2::geom_line(
-        ggplot2::aes(group = fiber_type),
-        size     = 1,
-        position = ggplot2::position_dodge(width = 0.35)
-      ) +
+      ggplot2::geom_line(position = pos, linewidth = 1) +
+      ggplot2::geom_point(position = pos, size = 3)
+    
+    if (has_ci) {
+      p <- p + ggplot2::geom_errorbar(
+        ggplot2::aes(ymin = lower.CL, ymax = upper.CL),
+        width    = 0.15,
+        position = pos,
+        linewidth = 0.6
+      )
+    } else if ("SE" %in% names(df_plot)) {
+      p <- p + ggplot2::geom_errorbar(
+        ggplot2::aes(ymin = emmean - SE, ymax = emmean + SE),
+        width    = 0.15,
+        position = pos,
+        linewidth = 0.6
+      )
+    }
+    
+    p +
       ggplot2::facet_wrap(~ week, nrow = 1, scales = "free_y") +
-      ggplot2::thememinimal() +
       ggplot2::labs(
-        title = "did_visualization",
-        x     = "treatment",
-        y     = "outcome"
+        title = "Difference-in-Differences visualization",
+        x     = "Treatment",
+        y     = "Estimated outcome"
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(
+        legend.position = "bottom",
+        plot.title = ggplot2::element_text(face = "bold")
       )
   })
   
@@ -8638,55 +8672,28 @@ server <- function(input, output, session) {
   
   # ---------- PNG download handlers ----------------------------------------------
   
-  output$download_did_plot_png <- downloadHandler(
-    filename = function() {
-      paste0("did_visualization_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      plot_obj <- did_plot_obj()
-      ggplot2::ggsave(
-        filename = file,
-        plot     = plot_obj,
-        width    = 8,
-        height   = 6,
-        units    = "in",
-        dpi      = 300,
-        bg       = "white",
-        device   = "png"
-      )
-    }
+  output$download_did_plot_png <- create_plot_download_handler(
+    plot_reactive = did_plot_obj,
+    base_filename = "did_visualization",
+    format = "png"
   )
   
-  output$download_did_table_png <- downloadHandler(
-    filename = function() {
-      paste0("did_results_", Sys.Date(), ".png")
-    },
-    content = function(file) {
+  output$download_did_table_png <- create_table_png_download_handler(
+    table_reactive = function() {
       did_res <- did_state()
       validate(need(!is.null(did_res), "Run DiD Analysis first."))
       validate(need(is.null(did_res$error), did_res$error))
       
       did_tbl <- did_res$did_tbl
       validate(need(!is.null(did_tbl) && nrow(did_tbl) > 0, "No DiD table to export."))
-      
-      gt_tbl <- gt::gt(did_tbl)
-      gt_tbl <- gt::fmt_number(gt_tbl, columns = where(is.numeric), decimals = 4)
-      gt_tbl <- gt::tab_header(
-        gt_tbl,
-        title = gt::md("Difference-in-differences results")
-      )
-      
-      temp_png <- tempfile(fileext = ".png")
-      gt::gtsave(gt_tbl, filename = temp_png)
-      file.copy(temp_png, file, overwrite = TRUE)
-    }
+      did_tbl
+    },
+    base_filename = "did_results",
+    title = "Difference-in-differences results"
   )
   
-  output$download_did_emm_table_png <- downloadHandler(
-    filename = function() {
-      paste0("did_emmeans_", Sys.Date(), ".png")
-    },
-    content = function(file) {
+  output$download_did_emm_table_png <- create_table_png_download_handler(
+    table_reactive = function() {
       did_res <- did_state()
       validate(need(!is.null(did_res), "Run DiD Analysis first."))
       validate(need(is.null(did_res$error), did_res$error))
@@ -8694,17 +8701,10 @@ server <- function(input, output, session) {
       emm_tbl <- did_res$emmeans_tbl
       validate(need(!is.null(emm_tbl) && nrow(emm_tbl) > 0, "No EMMeans table to export."))
       
-      gt_tbl <- gt::gt(emm_tbl)
-      gt_tbl <- gt::fmt_number(gt_tbl, columns = where(is.numeric), decimals = 4)
-      gt_tbl <- gt::tab_header(
-        gt_tbl,
-        title = gt::md("did_emmeans_grid")
-      )
-      
-      temp_png <- tempfile(fileext = ".png")
-      gt::gtsave(gt_tbl, filename = temp_png)
-      file.copy(temp_png, file, overwrite = TRUE)
-    }
+      emm_tbl
+    },
+    base_filename = "did_emmeans",
+    title = "EMMeans grid"
   )
   
   # Memory cleanup
