@@ -8560,61 +8560,84 @@ server <- function(input, output, session) {
     message("=== DID DONE (consolidated) ===")
   })
   
+  # ---- DiD plot object (restored behavior) ----
   did_plot_obj <- reactive({
-    did_res <- did_state()
-    validate(need(!is.null(did_res), "Run DiD Analysis first."))
-    validate(need(is.null(did_res$error), did_res$error))
+    # Pull DiD state and basic checks
+    res <- did_state()
+    validate(need(!is.null(res), "Run DiD Analysis first."))
     
-    emm_tbl <- did_res$emmeans_tbl
-    validate(need(!is.null(emm_tbl) && nrow(emm_tbl) > 0, "No EMM grid available to plot."))
+    dfp <- res$data
+    validate(need(is.data.frame(dfp) && nrow(dfp) > 0, "No data to plot."))
     
-    df_plot <- dplyr::mutate(
-      emm_tbl,
-      chem_treatment = factor(chem_treatment, levels = c("untreated", "treated")),
-      week = factor(week)
-    )
+    # Use only the raw observation-level data for plotting
+    # and ensure all key variables are simple vectors
+    dfp <- dfp %>%
+      dplyr::filter(
+        !is.na(outcome),
+        !is.na(chem_treatment),
+        !is.na(fiber_type),
+        !is.na(week)
+      ) %>%
+      dplyr::mutate(
+        # Match the original treatment encoding
+        chem_treatment = factor(
+          chem_treatment,
+          levels = c("untreated", "treated")
+        ),
+        # Make a *new* factor for faceting to avoid
+        # clobbering any internal numeric week encoding
+        week_fct = forcats::fct_inorder(as.factor(week)),
+        fiber_type = as.factor(fiber_type)
+      )
     
-    pos <- ggplot2::position_dodge(width = 0.25)
-    has_ci <- all(c("lower.CL", "upper.CL") %in% names(df_plot))
-    
-    p <- ggplot2::ggplot(
-      df_plot,
-      ggplot2::aes(x = chem_treatment, y = emmean, color = fiber_type, group = fiber_type)
+    # Reproduce the original DiD-style visualization
+    ggplot2::ggplot(
+      dfp,
+      ggplot2::aes(
+        x = chem_treatment,
+        y = outcome,
+        color = fiber_type
+      )
     ) +
-      ggplot2::geom_line(position = pos, linewidth = 1) +
-      ggplot2::geom_point(position = pos, size = 3)
-    
-    if (has_ci) {
-      p <- p + ggplot2::geom_errorbar(
-        ggplot2::aes(ymin = lower.CL, ymax = upper.CL),
-        width    = 0.15,
-        position = pos,
-        linewidth = 0.6
-      )
-    } else if ("SE" %in% names(df_plot)) {
-      p <- p + ggplot2::geom_errorbar(
-        ggplot2::aes(ymin = emmean - SE, ymax = emmean + SE),
-        width    = 0.15,
-        position = pos,
-        linewidth = 0.6
-      )
-    }
-    
-    p +
-      ggplot2::facet_wrap(~ week, nrow = 1, scales = "free_y") +
-      ggplot2::labs(
-        title = "Difference-in-Differences visualization",
-        x     = "Treatment",
-        y     = "Estimated outcome"
+      ggplot2::stat_summary(
+        fun = mean,
+        geom = "point",
+        size = 3,
+        position = ggplot2::position_dodge(width = 0.35)
+      ) +
+      ggplot2::stat_summary(
+        fun = mean,
+        geom = "line",
+        ggplot2::aes(group = fiber_type),
+        size = 1,
+        position = ggplot2::position_dodge(width = 0.35)
+      ) +
+      ggplot2::stat_summary(
+        fun.data = ~ c(
+          y    = mean(.),
+          ymin = mean(.) - stats::sd(.) / sqrt(length(.)),
+          ymax = mean(.) + stats::sd(.) / sqrt(length(.))
+        ),
+        geom = "errorbar",
+        width = 0.2,
+        position = ggplot2::position_dodge(width = 0.35)
+      ) +
+      ggplot2::facet_wrap(
+        ~ week_fct,
+        nrow = 1,
+        scales = "free_y"
       ) +
       ggplot2::theme_minimal() +
-      ggplot2::theme(
-        legend.position = "bottom",
-        plot.title = ggplot2::element_text(face = "bold")
+      ggplot2::labs(
+        title = "DiD visualization",
+        x = "Treatment",
+        y = "Outcome"
       )
   })
   
+  # ---- DiD plot render ----
   output$did_plot <- renderPlot({
+    validate(need(!is.null(did_plot_obj()), "No plot to display."))
     did_plot_obj()
   })
   
